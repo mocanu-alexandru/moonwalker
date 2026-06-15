@@ -43,7 +43,8 @@ class MockService : Service() {
     }
 
     private lateinit var lm: LocationManager
-    private val provider = LocationManager.GPS_PROVIDER
+    // Injectăm în ambii provideri ca să prevenim jumpingul între GPS fake și NETWORK real
+    private val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
     private var thread: Thread? = null
     @Volatile private var stopFlag = false
 
@@ -94,13 +95,15 @@ class MockService : Service() {
         running = true
         // setup mock provider
         try {
-            lm.addTestProvider(
-                provider, false, false, false, false,
-                true, true, true,
-                ProviderProperties.POWER_USAGE_LOW,
-                ProviderProperties.ACCURACY_FINE
-            )
-            lm.setTestProviderEnabled(provider, true)
+            for (p in providers) {
+                lm.addTestProvider(
+                    p, false, false, false, false,
+                    true, true, true,
+                    ProviderProperties.POWER_USAGE_LOW,
+                    ProviderProperties.ACCURACY_FINE
+                )
+                lm.setTestProviderEnabled(p, true)
+            }
         } catch (e: SecurityException) {
             statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
             stopEverything(); return
@@ -150,30 +153,31 @@ class MockService : Service() {
     }
 
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
-        try {
-            val loc = Location(provider).apply {
-                latitude = lat
-                longitude = lon
-                altitude = 100.0
-                accuracy = 3.0f                       // 0-4m, ca GPS bun
-                time = System.currentTimeMillis()
-                elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
-                speed = (speedKmh / 3.6).toFloat()
-                bearingAccuracyDegrees = 1.0f
-                speedAccuracyMetersPerSecond = 1.0f
-                verticalAccuracyMeters = 1.0f
-            }
-            lm.setTestProviderLocation(provider, loc)
-        } catch (e: Exception) {
-            statusText = "EROARE injectare: ${e.message}"
+        val now = System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtimeNanos()
+        for (p in providers) {
+            try {
+                val loc = Location(p).apply {
+                    latitude = lat; longitude = lon; altitude = 100.0
+                    accuracy = 3.0f
+                    time = now; elapsedRealtimeNanos = elapsed
+                    speed = (speedKmh / 3.6).toFloat()
+                    bearingAccuracyDegrees = 1.0f
+                    speedAccuracyMetersPerSecond = 1.0f
+                    verticalAccuracyMeters = 1.0f
+                }
+                lm.setTestProviderLocation(p, loc)
+            } catch (_: Exception) {}
         }
     }
 
     private fun stopEverything() {
         stopFlag = true
         running = false
-        try { lm.setTestProviderEnabled(provider, false) } catch (_: Exception) {}
-        try { lm.removeTestProvider(provider) } catch (_: Exception) {}
+        for (p in providers) {
+            try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
+            try { lm.removeTestProvider(p) } catch (_: Exception) {}
+        }
         if (statusText.startsWith("rulează")) statusText = "oprit"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -181,7 +185,7 @@ class MockService : Service() {
 
     override fun onDestroy() {
         stopFlag = true
-        try { lm.removeTestProvider(provider) } catch (_: Exception) {}
+        for (p in providers) { try { lm.removeTestProvider(p) } catch (_: Exception) {} }
         super.onDestroy()
     }
 
