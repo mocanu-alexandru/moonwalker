@@ -48,6 +48,8 @@ class MockService : Service() {
     private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
     @Volatile private var stopFlag = false
+    private var prevLat = Double.NaN
+    private var prevLon = Double.NaN
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -234,28 +236,42 @@ class MockService : Service() {
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
-        // Acuratețe 0.5m > WiFi real (~15-30m) → FLP preferă GPS-ul nostru în fuzionare normală.
+        val brg = if (!prevLat.isNaN()) calcBearing(prevLat, prevLon, lat, lon) else 0f
+        prevLat = lat; prevLon = lon
+        // Acuratețe 0.1m bate WiFi real (~15-30m) → FLP preferă GPS-ul nostru.
+        // Bearing explicit ajută FLP să estimeze viteza vectorial, nu doar scalar.
         // Fără setMockMode, output-ul FLP NU are isMock=true → Bump și Maps acceptă locația.
         for (p in activeProviders) {
             try {
                 val loc = Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
-                    accuracy = 0.5f
+                    accuracy = 0.1f
                     time = now; elapsedRealtimeNanos = elapsed
                     speed = (speedKmh / 3.6).toFloat()
-                    bearingAccuracyDegrees = 1.0f
-                    speedAccuracyMetersPerSecond = 0.1f
-                    verticalAccuracyMeters = 0.5f
+                    bearing = brg
+                    bearingAccuracyDegrees = 0.5f
+                    speedAccuracyMetersPerSecond = 0.05f
+                    verticalAccuracyMeters = 0.2f
                 }
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
         }
     }
 
+    private fun calcBearing(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Float {
+        val dLon = Math.toRadians(toLon - fromLon)
+        val lat1 = Math.toRadians(fromLat)
+        val lat2 = Math.toRadians(toLat)
+        val y = sin(dLon) * cos(lat2)
+        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        return ((Math.toDegrees(atan2(y, x)) + 360) % 360).toFloat()
+    }
+
     private fun stopEverything() {
         stopFlag = true
         running = false
         flpActive = false
+        prevLat = Double.NaN; prevLon = Double.NaN
         for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}

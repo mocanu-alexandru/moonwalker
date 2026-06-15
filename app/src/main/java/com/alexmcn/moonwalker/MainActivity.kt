@@ -303,7 +303,7 @@ class MainActivity : AppCompatActivity() {
         val rowM     = maxOf(10.0, rowBar.progress.toDouble())
         val hz       = hzBar.progress + 1
         val skipFrac = posBar.progress / 100.0
-        val stepM    = (stepBar.progress * 5 + 5).toDouble()
+        val stepM    = (stepBar.progress + 1).toDouble()
         val sec      = RouteGenerator.estimateDuration(zone, rowM, stepM, hz, isVertical, skipFrac)
         val timeStr  = fmtDuration(sec)
         val suffix   = if (skipFrac > 0.0) "  •  ~$timeStr restant" else "  •  ~$timeStr"
@@ -360,7 +360,7 @@ class MainActivity : AppCompatActivity() {
         // hzBar: 1-20 injecții/secundă (valoarea afișată = progress + 1)
         hzBar.max = 19; hzBar.progress = 0   // 0→1Hz … 19→20Hz
         rowBar.max = 300; rowBar.progress = 100
-        stepBar.max = 25; stepBar.progress = 1  // progress*5+5 → range 5-130m, default 10m
+        stepBar.max = 50; stepBar.progress = 9  // progress+1 → range 1-51m, default 10m
         posBar.max = 100; posBar.progress = 0
 
         hzBar.setOnSeekBarChangeListener(simpleSeek { updateHzLabel(); estimateAndShow() })
@@ -371,7 +371,7 @@ class MainActivity : AppCompatActivity() {
             estimateAndShow()
         })
         stepBar.setOnSeekBarChangeListener(simpleSeek {
-            val m = stepBar.progress * 5 + 5
+            val m = stepBar.progress + 1
             stepLbl.text = "Pas pe rând: $m m"
             updateHzLabel()
             refreshPreview()
@@ -391,7 +391,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateHzLabel() {
         val hz = hzBar.progress + 1
-        val stepM = stepBar.progress * 5 + 5
+        val stepM = stepBar.progress + 1
         val speedKmh = (stepM * hz * 3.6).toInt()
         hzLbl.text = "$hz inj/s → $speedKmh km/h virtual"
     }
@@ -428,7 +428,7 @@ class MainActivity : AppCompatActivity() {
         if (poly == null) { toast("Selectează o zonă mai întâi"); return }
 
         val hz = hzBar.progress + 1
-        val stepM = (stepBar.progress * 5 + 5).toDouble()
+        val stepM = (stepBar.progress + 1).toDouble()
         val speedKmh = (stepM * hz * 3.6).toInt()
         val i = Intent(this, MockService::class.java)
         i.putExtra(MockService.EXTRA_TICK_HZ,        hz)
