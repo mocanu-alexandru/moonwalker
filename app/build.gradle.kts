@@ -20,13 +20,32 @@ android {
         versionName = "1.0.$gitCommitCount"
     }
 
+    // Keystore consistent pentru toate build-urile (debug distribuit via repo, nu producție)
+    val ksFile = rootProject.file("keystore/moonwalker-debug.p12")
+    if (ksFile.exists()) {
+        signingConfigs {
+            create("consistent") {
+                storeFile = ksFile
+                storePassword = "moonwalker"
+                keyAlias = "moonwalker"
+                keyPassword = "moonwalker"
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            val sc = signingConfigs.findByName("consistent")
+            if (sc != null) signingConfig = sc
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val sc = signingConfigs.findByName("consistent")
+            if (sc != null) signingConfig = sc
         }
     }
     compileOptions {
