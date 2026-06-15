@@ -82,14 +82,22 @@ class MockService : Service() {
             )
         }
 
+        // Citim locația reală ÎNAINTE de addTestProvider — după aceea lm returnează locația mock
+        val realStart: DoubleArray? = try {
+            val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            if (loc != null) doubleArrayOf(loc.latitude, loc.longitude) else null
+        } catch (_: SecurityException) { null }
+
         startForeground(NOTIF_ID, buildNotif("pornire..."))
-        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction)
+        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction, realStart)
         return START_STICKY
     }
 
     private fun startWalking(
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
-        vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0
+        vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
+        realStart: DoubleArray? = null
     ) {
         stopFlag = false
         running = true
@@ -119,8 +127,14 @@ class MockService : Service() {
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
             val tickMs = 1000L / tickHz        // ms între injecții
             val metersPerTick = speedKmh * 1000.0 / 3600.0  // = stepM (1 waypoint per tick)
-            var prev: DoubleArray? = null
             pointsDone = 0
+
+            // Tranziție lină de la locația reală la primul waypoint din traseu
+            val firstPt = gen.next()
+            var prev: DoubleArray? = if (firstPt != null) {
+                if (realStart != null) doTransition(realStart, firstPt, tickMs, speedKmh)
+                firstPt
+            } else null
 
             while (!stopFlag) {
                 val target = gen.next()
@@ -152,6 +166,51 @@ class MockService : Service() {
             stopEverything()
         }
         thread?.start()
+    }
+
+    /**
+     * Injectează treptat de la `from` (locația reală) la `to` (primul waypoint al traseului).
+     * FLP folosește filtrare Kalman; o teleportare instantă e respinsă sau cauzează jumping.
+     * Returnează `to` ca să devină `prev` în bucla principală.
+     */
+    private fun doTransition(from: DoubleArray, to: DoubleArray, tickMs: Long, speedKmh: Double): DoubleArray {
+        val distM = RouteGenerator.haversine(from, to)
+        if (distM < 500.0) {
+            // Prea aproape — injectăm direct locația reală 2 ticks, fără interpolare
+            repeat(2) {
+                if (!stopFlag) {
+                    pushLocation(from[0], from[1], 0.0)
+                    curLat = from[0]; curLon = from[1]
+                    try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
+                }
+            }
+            return to
+        }
+        val nSteps = when {
+            distM < 5_000.0  -> 5
+            distM < 50_000.0 -> 10
+            else             -> 15
+        }
+        // 2 ticks la locația reală (FLP calibrare)
+        repeat(2) {
+            if (!stopFlag) {
+                pushLocation(from[0], from[1], 0.0)
+                curLat = from[0]; curLon = from[1]
+                try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
+            }
+        }
+        // nSteps ticks de interpolare liniară spre primul waypoint
+        for (s in 1..nSteps) {
+            if (stopFlag) break
+            val t = s.toDouble() / nSteps
+            val lat = from[0] + (to[0] - from[0]) * t
+            val lon = from[1] + (to[1] - from[1]) * t
+            pushLocation(lat, lon, speedKmh * t)
+            curLat = lat; curLon = lon
+            statusText = "pornire…"
+            try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
+        }
+        return to
     }
 
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {

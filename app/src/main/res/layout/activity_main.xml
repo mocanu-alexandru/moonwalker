@@ -90,8 +90,14 @@
 
         <TextView android:id="@+id/rowLbl"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Distanță rânduri: 130 m" android:textSize="12sp" />
+            android:text="Distanță rânduri: 100 m" android:textSize="12sp" />
         <SeekBar android:id="@+id/rowBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/stepLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Pas pe rând: 50 m" android:textSize="12sp" />
+        <SeekBar android:id="@+id/stepBar"
             android:layout_width="match_parent" android:layout_height="wrap_content" />
 
         <TextView android:id="@+id/posLbl"
