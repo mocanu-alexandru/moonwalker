@@ -89,6 +89,7 @@ class MainActivity : AppCompatActivity() {
         setupButtons()
         requestPerms()
         pollStatus()
+        showVersion()
     }
 
     // ── Hartă ────────────────────────────────────────────────────────────────
@@ -147,6 +148,14 @@ class MainActivity : AppCompatActivity() {
                 currentIso3 = country.iso3
                 level1Spinner.adapter = spinnerAdapter(listOf("Se încarcă…"))
                 level2Spinner.adapter = spinnerAdapter(listOf("—"))
+                // Contur țară din Nominatim (vizual imediat, înlocuit de regiune la selecție)
+                zoneLbl.text = "Se încarcă ${country.name}…"
+                RegionStore.searchCountryPolygon(this@MainActivity, country.iso2) { poly ->
+                    runOnUiThread {
+                        if (poly != null && selectedName.isEmpty()) setZone(country.name, poly)
+                        else if (poly != null && selectedName == country.name) setZone(country.name, poly)
+                    }
+                }
                 RegionStore.loadLevel1(this@MainActivity, country.iso3) { subs ->
                     runOnUiThread {
                         if (subs.isNullOrEmpty()) {
@@ -157,7 +166,6 @@ class MainActivity : AppCompatActivity() {
                             level1Spinner.adapter = spinnerAdapter(
                                 listOf("— alege regiunea —") + subs.map { it.name }
                             )
-                            // Dacă avem un nivel1 pending din tap, auto-selectăm acum
                             if (spinnerAutoSelect) tryAutoSelectLevel1()
                         }
                     }
@@ -235,16 +243,15 @@ class MainActivity : AppCompatActivity() {
     private fun tryAutoSelectLevel1() {
         val pending = pendingLevel1Name ?: run { spinnerAutoSelect = false; return }
         pendingLevel1Name = null
-        val norm = with(RegionStore) { pending.normForMatch() }
+        val norm = pending.normForMatch()
         val idx = level1Data.indexOfFirst { sub ->
-            val sNorm = with(RegionStore) { sub.name.normForMatch() }
+            val sNorm = sub.name.normForMatch()
             sNorm == norm || sNorm.contains(norm) || norm.contains(sNorm)
         }
         if (idx >= 0) {
-            level1Spinner.setSelection(idx + 1)  // +1 pentru placeholder
-            // spinnerAutoSelect=true rămâne, consumat în level1.onItemSelected
+            level1Spinner.setSelection(idx + 1)
         } else {
-            spinnerAutoSelect = false  // nu am găsit match, eliberăm flag-ul
+            spinnerAutoSelect = false
         }
     }
 
@@ -445,6 +452,13 @@ class MainActivity : AppCompatActivity() {
         override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = onChange()
         override fun onStartTrackingTouch(s: SeekBar?) {}
         override fun onStopTrackingTouch(s: SeekBar?) {}
+    }
+
+    private fun showVersion() {
+        try {
+            val v = packageManager.getPackageInfo(packageName, 0).versionName
+            findViewById<TextView>(R.id.versionTv).text = "Moonwalker $v"
+        } catch (_: Exception) {}
     }
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()

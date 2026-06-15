@@ -5,8 +5,8 @@ import kotlin.math.*
 /**
  * Generează coordonate live pentru o serpentină (boustrophedon) peste o zonă.
  *
- * vertical=false → rânduri E-V (orizontal, ca un TV raster)
- * vertical=true  → coloane N-S (vertical, ca un aspirator/robot de gazon)
+ * vertical=false → rânduri E-V (orizontal)
+ * vertical=true  → coloane N-S (vertical, robot de gazon)
  */
 class RouteGenerator(
     private val zone: Zone,
@@ -17,11 +17,9 @@ class RouteGenerator(
     private val M_LAT = 111_320.0
     private val latCenter = (zone.latMin + zone.latMax) / 2.0
 
-    // spacing între linii (rând sau coloană) în coordonate geografice
     private val dLatLine = rowSpacingM / M_LAT
     private val dLonLine = rowSpacingM / (M_LAT * cos(Math.toRadians(latCenter)))
 
-    /** numărul total de linii (rânduri orizontale sau coloane verticale) */
     private val nLines: Int = if (!vertical)
         max(1, ((zone.latMax - zone.latMin) / dLatLine).toInt() + 1)
     else
@@ -37,9 +35,7 @@ class RouteGenerator(
     private fun buildLine(idx: Int) {
         if (idx >= nLines) { finished = true; currentLinePoints = emptyList(); return }
         val pts = ArrayList<DoubleArray>()
-
         if (!vertical) {
-            // Rând orizontal: latitudine fixă, pas pe longitudine
             val lat = zone.latMax - idx * dLatLine
             val kLon = M_LAT * cos(Math.toRadians(lat))
             val dLonStep = stepM / kLon
@@ -49,7 +45,6 @@ class RouteGenerator(
                 lon += dLonStep
             }
         } else {
-            // Coloană verticală: longitudine fixă, pas pe latitudine
             val lon = zone.lonMin + idx * dLonLine
             val dLatStep = stepM / M_LAT
             var lat = zone.latMax
@@ -58,12 +53,9 @@ class RouteGenerator(
                 lat -= dLatStep
             }
         }
-
-        // serpentină: liniile impare sunt parcurse în sens invers
         if (idx % 2 == 1) pts.reverse()
         currentLinePoints = pts
         colInLine = 0
-        // dacă linia e în afara poligonului, sari la următoarea
         if (pts.isEmpty() && idx + 1 < nLines) buildLine(idx + 1)
     }
 
@@ -75,28 +67,23 @@ class RouteGenerator(
             buildLine(lineIndex)
             if (finished) return null
         }
-        val p = currentLinePoints[colInLine]
-        colInLine++
-        return p
+        return currentLinePoints[colInLine++]
     }
 
     fun progress(): Double = if (nLines == 0) 1.0 else min(1.0, lineIndex.toDouble() / nLines)
     fun isFinished() = finished
-
     fun reset() { lineIndex = 0; colInLine = 0; finished = false; buildLine(0) }
-
     val totalRows: Int get() = nLines
-
     fun seekToRow(n: Int) {
         lineIndex = n.coerceIn(0, nLines - 1)
-        colInLine = 0; finished = false
-        buildLine(lineIndex)
+        colInLine = 0; finished = false; buildLine(lineIndex)
     }
 
     companion object {
         /**
-         * Preview rapid al traseului (bbox-based, fără clipping la poligon).
-         * vertical=false → linii orizontale, vertical=true → coloane verticale.
+         * Preview rapid al traseului.
+         * Dacă zone.polygon există, fiecare linie e clipată la conturul real al poligonului
+         * (scanline intersection) — nu mai apare ca dreptunghi.
          */
         fun computePreview(
             zone: Zone, rowM: Double,
@@ -104,7 +91,9 @@ class RouteGenerator(
             maxRows: Int = 500,
             vertical: Boolean = false
         ): List<DoubleArray> {
-            if (!vertical) {
+            val poly = zone.polygon
+
+            return if (!vertical) {
                 val dLatRow = rowM / 111_320.0
                 val nRows = max(1, ((zone.latMax - zone.latMin) / dLatRow).toInt() + 1)
                 val startRow = (fromFraction * nRows).toInt().coerceIn(0, nRows)
@@ -116,16 +105,33 @@ class RouteGenerator(
                 var idx = startRow
                 while (idx < endRow) {
                     val lat = zone.latMax - idx * dLatRow
-                    if (idx % 2 == 0) {
-                        result.add(doubleArrayOf(lat, zone.lonMin))
-                        result.add(doubleArrayOf(lat, zone.lonMax))
+                    val goRight = idx % 2 == 0
+                    if (poly != null) {
+                        // Scanline: intersecții cu muchiile poligonului la latitudinea curentă
+                        val lons = scanlineHits(poly, lat, coordIdx = 0, valueIdx = 1)
+                        var k = 0
+                        while (k + 1 < lons.size) {
+                            if (goRight) {
+                                result.add(doubleArrayOf(lat, lons[k]))
+                                result.add(doubleArrayOf(lat, lons[k + 1]))
+                            } else {
+                                result.add(doubleArrayOf(lat, lons[k + 1]))
+                                result.add(doubleArrayOf(lat, lons[k]))
+                            }
+                            k += 2
+                        }
                     } else {
-                        result.add(doubleArrayOf(lat, zone.lonMax))
-                        result.add(doubleArrayOf(lat, zone.lonMin))
+                        if (goRight) {
+                            result.add(doubleArrayOf(lat, zone.lonMin))
+                            result.add(doubleArrayOf(lat, zone.lonMax))
+                        } else {
+                            result.add(doubleArrayOf(lat, zone.lonMax))
+                            result.add(doubleArrayOf(lat, zone.lonMin))
+                        }
                     }
                     idx += step
                 }
-                return result
+                result
             } else {
                 val latCenter = (zone.latMin + zone.latMax) / 2.0
                 val dLon = rowM / (111_320.0 * cos(Math.toRadians(latCenter)))
@@ -139,24 +145,68 @@ class RouteGenerator(
                 var idx = startCol
                 while (idx < endCol) {
                     val lon = zone.lonMin + idx * dLon
-                    if (idx % 2 == 0) {
-                        result.add(doubleArrayOf(zone.latMax, lon))
-                        result.add(doubleArrayOf(zone.latMin, lon))
+                    val goDown = idx % 2 == 0
+                    if (poly != null) {
+                        // Scanline: intersecții cu muchiile poligonului la longitudinea curentă
+                        val lats = scanlineHits(poly, lon, coordIdx = 1, valueIdx = 0)
+                        var k = 0
+                        while (k + 1 < lats.size) {
+                            val lo = lats[k]; val hi = lats[k + 1]
+                            if (goDown) {
+                                result.add(doubleArrayOf(hi, lon))
+                                result.add(doubleArrayOf(lo, lon))
+                            } else {
+                                result.add(doubleArrayOf(lo, lon))
+                                result.add(doubleArrayOf(hi, lon))
+                            }
+                            k += 2
+                        }
                     } else {
-                        result.add(doubleArrayOf(zone.latMin, lon))
-                        result.add(doubleArrayOf(zone.latMax, lon))
+                        if (goDown) {
+                            result.add(doubleArrayOf(zone.latMax, lon))
+                            result.add(doubleArrayOf(zone.latMin, lon))
+                        } else {
+                            result.add(doubleArrayOf(zone.latMin, lon))
+                            result.add(doubleArrayOf(zone.latMax, lon))
+                        }
                     }
                     idx += step
                 }
-                return result
+                result
             }
+        }
+
+        /**
+         * Returnează valorile (sortate) pe axa valueIdx unde scanline la coord
+         * intersectează muchiile poligonului poly.
+         * coordIdx=0/valueIdx=1 → scanline orizontal (lat fix, vrem lon)
+         * coordIdx=1/valueIdx=0 → scanline vertical (lon fix, vrem lat)
+         */
+        private fun scanlineHits(
+            poly: List<DoubleArray>,
+            coord: Double,
+            coordIdx: Int,
+            valueIdx: Int
+        ): List<Double> {
+            val hits = ArrayList<Double>()
+            for (i in poly.indices) {
+                val p1 = poly[i]; val p2 = poly[(i + 1) % poly.size]
+                val c1 = p1[coordIdx]; val c2 = p2[coordIdx]
+                // Convenție: contorizăm muchia dacă scanline trece strict prin interior
+                if ((c1 <= coord && coord < c2) || (c2 <= coord && coord < c1)) {
+                    val t = (coord - c1) / (c2 - c1)
+                    hits.add(p1[valueIdx] + t * (p2[valueIdx] - p1[valueIdx]))
+                }
+            }
+            hits.sort()
+            return hits
         }
 
         fun haversine(a: DoubleArray, b: DoubleArray): Double {
             val R = 6_371_000.0
             val la1 = Math.toRadians(a[0]); val la2 = Math.toRadians(b[0])
             val dLa = la2 - la1; val dLo = Math.toRadians(b[1] - a[1])
-            val h = sin(dLa/2).pow(2) + cos(la1)*cos(la2)*sin(dLo/2).pow(2)
+            val h = sin(dLa / 2).pow(2) + cos(la1) * cos(la2) * sin(dLo / 2).pow(2)
             return 2 * R * asin(sqrt(h))
         }
     }

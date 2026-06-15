@@ -7,6 +7,13 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** Normalizează string pentru matching fuzzy: minuscule, fără diacritice, fără sufixe administratve */
+fun String.normForMatch() = lowercase()
+    .replace('ș', 's').replace('ş', 's').replace('ț', 't').replace('ţ', 't')
+    .replace('ă', 'a').replace('â', 'a').replace('î', 'i')
+    .replace(Regex("\\s+(county|judet|judeţ|județ|department|département|région|region|oblast|province|provincia)\\s*$"), "")
+    .trim()
+
 /**
  * Gestionează datele de regiuni geografice:
  *  - lista de țări europene (bundled)
@@ -216,13 +223,34 @@ object RegionStore {
         return result
     }
 
+    /** Descarcă și cache-uiește conturul unei țări via Nominatim search (ISO2 lowercase). */
+    fun searchCountryPolygon(ctx: Context, iso2: String, callback: (List<DoubleArray>?) -> Unit) {
+        Thread {
+            try {
+                val cache = File(cacheDir(ctx), "country_${iso2.lowercase()}.json")
+                val poly = if (cache.exists()) loadCache(cache).firstOrNull()?.poly
+                           else fetchAndCacheCountryPoly(cache, iso2)
+                callback(poly)
+            } catch (e: Exception) { callback(null) }
+        }.start()
+    }
+
+    private fun fetchAndCacheCountryPoly(cache: File, iso2: String): List<DoubleArray>? {
+        val url = "https://nominatim.openstreetmap.org/search" +
+            "?country=${iso2.lowercase()}&format=jsonv2&polygon_geojson=1&limit=1"
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", "Moonwalker/1.0 (alexutus@gmail.com)")
+        conn.connectTimeout = 15_000; conn.readTimeout = 30_000
+        if (conn.responseCode != 200) return null
+        val results = JSONArray(conn.inputStream.bufferedReader().readText())
+        conn.disconnect()
+        if (results.length() == 0) return null
+        val geo = results.getJSONObject(0).optJSONObject("geojson") ?: return null
+        val poly = simplify(extractLargestPoly(geo) ?: return null, 600)
+        saveCache(cache, listOf(Subdivision("", "", poly)))
+        return poly
+    }
+
     /** Normalizează pentru comparare internă (filtrare nivel 2 după nivel 1) */
     private fun String.norm() = normForMatch()
-
-    /** Normalizează pentru matching UI: minuscule, fără diacritice, fără sufixe gen "County" */
-    fun String.normForMatch() = lowercase()
-        .replace('ș', 's').replace('ş', 's').replace('ț', 't').replace('ţ', 't')
-        .replace('ă', 'a').replace('â', 'a').replace('î', 'i')
-        .replace(Regex("\\s+(county|judet|judeţ|județ|department|département|région|region|oblast|province|provincia)\\s*$"), "")
-        .trim()
 }
