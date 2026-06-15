@@ -10,8 +10,6 @@ import android.os.*
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
-import com.google.android.gms.tasks.Tasks
-import java.util.concurrent.TimeUnit
 import kotlin.math.*
 
 /**
@@ -49,8 +47,8 @@ class MockService : Service() {
 
     private lateinit var lm: LocationManager
     private lateinit var fusedClient: FusedLocationProviderClient
-    // Injectăm în ambii provideri ca să prevenim jumpingul între GPS fake și NETWORK real
-    private val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+    // Lista efectivă de provideri activi — construită dinamic la fiecare start
+    private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
     @Volatile private var stopFlag = false
 
@@ -108,11 +106,12 @@ class MockService : Service() {
     ) {
         stopFlag = false
         running = true
-        // viteza efectivă = stepM × Hz × 3.6 km/h (un waypoint per tick la această viteză)
         val speedKmh = stepM * tickHz * 3.6
-        // setup mock provider
+
+        // Construim lista de provideri: GPS + NETWORK (obligatorii) + "fused" dacă e disponibil
+        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
         try {
-            for (p in providers) {
+            for (p in activeProviders) {
                 lm.addTestProvider(
                     p, false, false, false, false,
                     true, true, true,
@@ -128,16 +127,31 @@ class MockService : Service() {
             statusText = "EROARE mock provider: ${e.message}"
             stopEverything(); return
         }
+        // "fused" = providerul intern FLP pe unele Android — îl mockăm direct dacă există
+        try {
+            if (lm.allProviders.contains("fused")) {
+                lm.addTestProvider(
+                    "fused", false, false, false, false,
+                    true, true, true,
+                    ProviderProperties.POWER_USAGE_LOW,
+                    ProviderProperties.ACCURACY_FINE
+                )
+                lm.setTestProviderEnabled("fused", true)
+                activeProviders.add("fused")
+            }
+        } catch (_: Exception) {}
+
+        // setMockMode pe main thread (are Looper) — nu în background thread cu Tasks.await
+        fusedClient.setMockMode(true)
+            .addOnSuccessListener { flpActive = true }
+            .addOnFailureListener { e ->
+                flpActive = false
+                statusText = "⚠ FLP: ${e.javaClass.simpleName}"
+            }
 
         thread = Thread {
-            // Dezactivăm sursele WiFi/cell din FLP — timeout 5s ca să nu blocăm thread-ul la infinit
-            flpActive = try {
-                Tasks.await(fusedClient.setMockMode(true), 5, TimeUnit.SECONDS)
-                true
-            } catch (e: Exception) {
-                statusText = "⚠ FLP inactiv: ${e.javaClass.simpleName}"
-                false
-            }
+            // Pauză scurtă ca FLP să activeze mock mode înainte de prima injecție
+            try { Thread.sleep(1000) } catch (_: InterruptedException) {}
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
@@ -232,7 +246,7 @@ class MockService : Service() {
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
-        for (p in providers) {
+        for (p in activeProviders) {
             try {
                 val loc = Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
@@ -265,10 +279,11 @@ class MockService : Service() {
         running = false
         flpActive = false
         try { fusedClient.setMockMode(false) } catch (_: Exception) {}
-        for (p in providers) {
+        for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
         }
+        activeProviders.clear()
         if (statusText.startsWith("rulează")) statusText = "oprit"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -276,7 +291,7 @@ class MockService : Service() {
 
     override fun onDestroy() {
         stopFlag = true
-        for (p in providers) { try { lm.removeTestProvider(p) } catch (_: Exception) {} }
+        for (p in activeProviders) { try { lm.removeTestProvider(p) } catch (_: Exception) {} }
         super.onDestroy()
     }
 
