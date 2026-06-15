@@ -260,9 +260,11 @@ class MockService : Service() {
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
         }
-        // Injectăm și în FLP direct — suprascrie scanarea WiFi internă a Google Play Services
+        // Injectăm în FLP cu flag isMock șters via reflection.
+        // LocationManager re-setează flag-ul automat (nu putem evita),
+        // dar GMS/FLP respectă valoarea din obiect → apps văd locație non-mock.
         try {
-            fusedClient.setMockLocation(Location(LocationManager.GPS_PROVIDER).apply {
+            val flpLoc = Location(LocationManager.GPS_PROVIDER).apply {
                 latitude = lat; longitude = lon; altitude = 100.0
                 accuracy = 3.0f
                 time = now; elapsedRealtimeNanos = elapsed
@@ -270,7 +272,13 @@ class MockService : Service() {
                 bearingAccuracyDegrees = 1.0f
                 speedAccuracyMetersPerSecond = 1.0f
                 verticalAccuracyMeters = 1.0f
-            })
+            }
+            try {
+                val f = Location::class.java.getDeclaredField("mIsFromMockProvider")
+                f.isAccessible = true
+                f.set(flpLoc, false)
+            } catch (_: Exception) {}
+            fusedClient.setMockLocation(flpLoc)
         } catch (_: Exception) {}
     }
 
