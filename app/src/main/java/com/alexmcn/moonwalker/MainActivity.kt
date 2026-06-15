@@ -28,10 +28,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var level2Spinner: Spinner
     private lateinit var btnDirection: ToggleButton
     private lateinit var status: TextView
-    private lateinit var speedBar: SeekBar
+    private lateinit var hzBar: SeekBar
     private lateinit var rowBar: SeekBar
     private lateinit var posBar: SeekBar
-    private lateinit var speedLbl: TextView
+    private lateinit var hzLbl: TextView
     private lateinit var rowLbl: TextView
     private lateinit var posLbl: TextView
     private lateinit var controlPanel: LinearLayout
@@ -74,10 +74,10 @@ class MainActivity : AppCompatActivity() {
         level2Spinner  = findViewById(R.id.level2Spinner)
         btnDirection   = findViewById(R.id.btnDirection)
         status         = findViewById(R.id.status)
-        speedBar       = findViewById(R.id.speedBar)
+        hzBar          = findViewById(R.id.hzBar)
         rowBar         = findViewById(R.id.rowBar)
         posBar         = findViewById(R.id.posBar)
-        speedLbl       = findViewById(R.id.speedLbl)
+        hzLbl          = findViewById(R.id.hzLbl)
         rowLbl         = findViewById(R.id.rowLbl)
         posLbl         = findViewById(R.id.posLbl)
         controlPanel   = findViewById(R.id.controlPanel)
@@ -310,15 +310,15 @@ class MainActivity : AppCompatActivity() {
     // ── Slidere ───────────────────────────────────────────────────────────────
 
     private fun setupSliders() {
-        speedBar.max = 1000; speedBar.progress = 120
-        rowBar.max   = 300;  rowBar.progress   = 130
-        posBar.max   = 100;  posBar.progress   = 0
+        // hzBar: 1-20 injecții/secundă (valoarea afișată = progress + 1)
+        hzBar.max = 19; hzBar.progress = 0   // 0→1Hz … 19→20Hz
+        rowBar.max = 300; rowBar.progress = 130
+        posBar.max = 100; posBar.progress = 0
 
-        speedBar.setOnSeekBarChangeListener(simpleSeek {
-            speedLbl.text = "Viteză: ${speedBar.progress} km/h"
-        })
+        hzBar.setOnSeekBarChangeListener(simpleSeek { updateHzLabel() })
         rowBar.setOnSeekBarChangeListener(simpleSeek {
             rowLbl.text = "Distanță rânduri: ${rowBar.progress} m"
+            updateHzLabel()   // viteza depinde și de rowSpacing (indirect prin stepM)
             refreshPreview()
         })
         posBar.setOnSeekBarChangeListener(simpleSeek {
@@ -326,9 +326,16 @@ class MainActivity : AppCompatActivity() {
             refreshPreview()
         })
 
-        speedLbl.text = "Viteză: 120 km/h"
-        rowLbl.text   = "Distanță rânduri: 130 m"
-        posLbl.text   = "Start din: 0%"
+        updateHzLabel()
+        rowLbl.text = "Distanță rânduri: 130 m"
+        posLbl.text = "Start din: 0%"
+    }
+
+    /** stepM e fix 75m; viteza efectivă = stepM × Hz × 3.6 */
+    private fun updateHzLabel() {
+        val hz = hzBar.progress + 1
+        val speedKmh = (75.0 * hz * 3.6).toInt()
+        hzLbl.text = "$hz inj/s → $speedKmh km/h virtual"
     }
 
     // ── Butoane ───────────────────────────────────────────────────────────────
@@ -361,17 +368,19 @@ class MainActivity : AppCompatActivity() {
         val poly = selectedPoly
         if (poly == null) { toast("Selectează o zonă mai întâi"); return }
 
+        val hz = hzBar.progress + 1
+        val speedKmh = (75.0 * hz * 3.6).toInt()
         val i = Intent(this, MockService::class.java)
-        i.putExtra(MockService.EXTRA_SPEED_KMH,    speedBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_ROW_M,         rowBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_STEP_M,         75.0)
-        i.putExtra(MockService.EXTRA_VERTICAL,       isVertical)
-        i.putExtra(MockService.EXTRA_LOOP,           true)
-        i.putExtra(MockService.EXTRA_SKIP_FRACTION, posBar.progress / 100.0)
-        i.putExtra(MockService.EXTRA_POLY,          poly.joinToString(";") { "${it[0]},${it[1]}" })
+        i.putExtra(MockService.EXTRA_TICK_HZ,        hz)
+        i.putExtra(MockService.EXTRA_ROW_M,          rowBar.progress.toDouble())
+        i.putExtra(MockService.EXTRA_STEP_M,          75.0)
+        i.putExtra(MockService.EXTRA_VERTICAL,        isVertical)
+        i.putExtra(MockService.EXTRA_LOOP,            true)
+        i.putExtra(MockService.EXTRA_SKIP_FRACTION,  posBar.progress / 100.0)
+        i.putExtra(MockService.EXTRA_POLY,           poly.joinToString(";") { "${it[0]},${it[1]}" })
         startForegroundService(i)
         val dir = if (isVertical) "vertical" else "orizontal"
-        toast("Pornit $dir: $selectedName")
+        toast("Pornit $dir: $selectedName • $hz Hz • $speedKmh km/h")
     }
 
     // ── Polling status & marker GPS ───────────────────────────────────────────

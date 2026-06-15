@@ -27,7 +27,7 @@ class MockService : Service() {
         const val EXTRA_LAT_MIN = "latMin"; const val EXTRA_LAT_MAX = "latMax"
         const val EXTRA_LON_MIN = "lonMin"; const val EXTRA_LON_MAX = "lonMax"
         const val EXTRA_POLY = "poly"
-        const val EXTRA_SPEED_KMH = "speed"
+        const val EXTRA_TICK_HZ = "tickHz"    // injecții GPS/secundă (default 1)
         const val EXTRA_ROW_M = "rowM"; const val EXTRA_STEP_M = "stepM"
         const val EXTRA_VERTICAL = "vertical"; const val EXTRA_LOOP = "loop"
         const val EXTRA_SKIP_FRACTION = "skipFraction"
@@ -59,7 +59,7 @@ class MockService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopEverything(); return START_NOT_STICKY }
 
-        val speed = intent?.getDoubleExtra(EXTRA_SPEED_KMH, 120.0) ?: 120.0
+        val tickHz = (intent?.getIntExtra(EXTRA_TICK_HZ, 1) ?: 1).coerceIn(1, 100)
         val rowM = intent?.getDoubleExtra(EXTRA_ROW_M, 130.0) ?: 130.0
         val stepM = intent?.getDoubleExtra(EXTRA_STEP_M, 75.0) ?: 75.0
         val vertical = intent?.getBooleanExtra(EXTRA_VERTICAL, false) ?: false
@@ -83,16 +83,18 @@ class MockService : Service() {
         }
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
-        startWalking(zone, speed, rowM, stepM, vertical, loop, skipFraction)
+        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction)
         return START_STICKY
     }
 
     private fun startWalking(
-        zone: Zone, speedKmh: Double, rowM: Double, stepM: Double,
+        zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0
     ) {
         stopFlag = false
         running = true
+        // viteza efectivă = stepM × Hz × 3.6 km/h (un waypoint per tick la această viteză)
+        val speedKmh = stepM * tickHz * 3.6
         // setup mock provider
         try {
             for (p in providers) {
@@ -115,8 +117,8 @@ class MockService : Service() {
         thread = Thread {
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
-            val tickMs = 1000L                 // o injecție pe secundă
-            val metersPerTick = speedKmh * 1000.0 / 3600.0  // m parcurși/tick la viteza dată
+            val tickMs = 1000L / tickHz        // ms între injecții
+            val metersPerTick = speedKmh * 1000.0 / 3600.0  // = stepM (1 waypoint per tick)
             var prev: DoubleArray? = null
             pointsDone = 0
 

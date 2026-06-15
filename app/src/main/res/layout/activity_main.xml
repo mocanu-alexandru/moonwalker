@@ -82,10 +82,10 @@
             android:textSize="12sp"
             android:text="○ oprit" />
 
-        <TextView android:id="@+id/speedLbl"
+        <TextView android:id="@+id/hzLbl"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Viteză: 120 km/h" android:textSize="12sp" />
-        <SeekBar android:id="@+id/speedBar"
+            android:text="Frecvență: 1 inj/s → 270 km/h virtual" android:textSize="12sp" />
+        <SeekBar android:id="@+id/hzBar"
             android:layout_width="match_parent" android:layout_height="wrap_content" />
 
         <TextView android:id="@+id/rowLbl"
