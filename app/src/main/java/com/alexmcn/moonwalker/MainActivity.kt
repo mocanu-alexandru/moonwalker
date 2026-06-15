@@ -79,6 +79,8 @@ class MainActivity : AppCompatActivity() {
             Counties.names())
         countySpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                // Selectarea unui județ comută automat la modul "Județ din listă"
+                if (modeSpinner.selectedItemPosition != 1) modeSpinner.setSelection(1)
                 showCountyOnMap(Counties.names()[pos])
                 refreshPreview()
             }
