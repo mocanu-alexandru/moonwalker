@@ -26,6 +26,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var countrySpinner: Spinner
     private lateinit var level1Spinner: Spinner
     private lateinit var level2Spinner: Spinner
+    private lateinit var btnDirection: ToggleButton
     private lateinit var status: TextView
     private lateinit var speedBar: SeekBar
     private lateinit var rowBar: SeekBar
@@ -36,7 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var controlPanel: LinearLayout
     private lateinit var btnToggle: Button
 
-    // ── Stare zonă selectată ────────────────────────────────────────────────
+    // ── Stare zonă ───────────────────────────────────────────────────────────
     private var selectedPoly: List<DoubleArray>? = null
     private var selectedName: String = ""
     private var zoneOutline: Polygon? = null
@@ -44,14 +45,20 @@ class MainActivity : AppCompatActivity() {
     private var routeActiveOverlay: Polyline? = null
     private var curMarker: Marker? = null
     private val ui = Handler(Looper.getMainLooper())
+    private var isVertical = false
 
-    // ── Stare spinere (tracking ca să prevenim cascade onItemSelected) ──────
-    private var countryPos = -1   // -1 = neiniţializat
+    // ── Stare spinere ────────────────────────────────────────────────────────
+    // Tracking poziție ca să prevenim cascade spurioase onItemSelected
+    private var countryPos = -1
     private var level1Pos  = -1
     private var level2Pos  = -1
     private var currentIso3 = ""
     private var level1Data: List<RegionStore.Subdivision> = emptyList()
     private var level2Data: List<RegionStore.Subdivision> = emptyList()
+
+    // Folosit la auto-select din tap pe hartă — previne re-setarea zonei din cascada spinnerelor
+    private var spinnerAutoSelect = false
+    private var pendingLevel1Name: String? = null
 
     // ────────────────────────────────────────────────────────────────────────
 
@@ -65,6 +72,7 @@ class MainActivity : AppCompatActivity() {
         countrySpinner = findViewById(R.id.countrySpinner)
         level1Spinner  = findViewById(R.id.level1Spinner)
         level2Spinner  = findViewById(R.id.level2Spinner)
+        btnDirection   = findViewById(R.id.btnDirection)
         status         = findViewById(R.id.status)
         speedBar       = findViewById(R.id.speedBar)
         rowBar         = findViewById(R.id.rowBar)
@@ -98,7 +106,10 @@ class MainActivity : AppCompatActivity() {
                 RegionStore.reverseGeocode(p.latitude, p.longitude, map.zoomLevelDouble) { zone ->
                     runOnUiThread {
                         if (zone?.poly != null) {
+                            // Setăm zona cu poligonul Nominatim (mai precis)
                             setZone(zone.name, zone.poly)
+                            // Tentativă auto-select în spinere (nu suprascrie zona)
+                            autoSelectSpinners(zone.countryCode, zone.level1Name)
                         } else {
                             zoneLbl.text = if (selectedName.isNotEmpty()) selectedName
                                            else "Apasă pe hartă sau alege din liste"
@@ -113,10 +124,9 @@ class MainActivity : AppCompatActivity() {
         map.overlays.add(MapEventsOverlay(receiver))
     }
 
-    // ── Spinere ierarhice ────────────────────────────────────────────────────
+    // ── Spinere ierarhice ─────────────────────────────────────────────────────
 
     private fun setupSpinners() {
-        // Populează lista țărilor (placeholder la poziția 0)
         val countryNames = listOf("— alege țara —") + RegionStore.EUROPE.map { it.name }
         countrySpinner.adapter = spinnerAdapter(countryNames)
         level1Spinner.adapter  = spinnerAdapter(listOf("— alege —"))
@@ -126,7 +136,6 @@ class MainActivity : AppCompatActivity() {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 if (pos == countryPos) return
                 countryPos = pos
-                // reset cascadă
                 level1Pos = -1; level2Pos = -1
                 level1Data = emptyList(); level2Data = emptyList()
                 if (pos == 0) {
@@ -142,11 +151,14 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         if (subs.isNullOrEmpty()) {
                             level1Spinner.adapter = spinnerAdapter(listOf("Fără date"))
+                            spinnerAutoSelect = false
                         } else {
                             level1Data = subs
                             level1Spinner.adapter = spinnerAdapter(
                                 listOf("— alege regiunea —") + subs.map { it.name }
                             )
+                            // Dacă avem un nivel1 pending din tap, auto-selectăm acum
+                            if (spinnerAutoSelect) tryAutoSelectLevel1()
                         }
                     }
                 }
@@ -164,7 +176,9 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
                 val sub = level1Data[pos - 1]
-                setZone(sub.name, sub.poly)
+                // Dacă selecția vine din tap (spinnerAutoSelect), nu suprascrim zona Nominatim
+                if (!spinnerAutoSelect) setZone(sub.name, sub.poly)
+                spinnerAutoSelect = false  // consumat
                 level2Spinner.adapter = spinnerAdapter(listOf("Se descarcă…"))
                 RegionStore.loadLevel2(this@MainActivity, currentIso3, sub.name) { subs ->
                     runOnUiThread {
@@ -186,12 +200,52 @@ class MainActivity : AppCompatActivity() {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 if (pos == level2Pos) return
                 level2Pos = pos
-                if (pos == 0 || level2Data.isEmpty()) return  // placeholder → păstrăm zona nivel 1
+                if (pos == 0 || level2Data.isEmpty()) return
                 val sub = level2Data[pos - 1]
                 setZone(sub.name, sub.poly)
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         })
+    }
+
+    /**
+     * Încearcă să selecteze automat în spinere după un tap pe hartă.
+     * Setăm spinnerAutoSelect=true ca să nu suprascriem zona Nominatim
+     * când cascada onItemSelected se declanșează programatic.
+     */
+    private fun autoSelectSpinners(countryCode: String?, level1Name: String?) {
+        val iso2 = countryCode?.uppercase() ?: return
+        val countryIdx = RegionStore.EUROPE.indexOfFirst { it.iso2 == iso2 }
+        if (countryIdx < 0) return
+
+        pendingLevel1Name = level1Name
+        spinnerAutoSelect = true
+
+        val spinnerPos = countryIdx + 1  // +1 pentru placeholder
+        if (spinnerPos == countryPos) {
+            // Aceeași țară deja selectată — level1Data deja încărcată
+            tryAutoSelectLevel1()
+        } else {
+            // Altă țară — declanșăm cascada (spinnerAutoSelect rămâne true până la level1)
+            countrySpinner.setSelection(spinnerPos)
+        }
+    }
+
+    /** Caută pendingLevel1Name în level1Data și selectează în level1Spinner dacă găsește. */
+    private fun tryAutoSelectLevel1() {
+        val pending = pendingLevel1Name ?: run { spinnerAutoSelect = false; return }
+        pendingLevel1Name = null
+        val norm = with(RegionStore) { pending.normForMatch() }
+        val idx = level1Data.indexOfFirst { sub ->
+            val sNorm = with(RegionStore) { sub.name.normForMatch() }
+            sNorm == norm || sNorm.contains(norm) || norm.contains(sNorm)
+        }
+        if (idx >= 0) {
+            level1Spinner.setSelection(idx + 1)  // +1 pentru placeholder
+            // spinnerAutoSelect=true rămâne, consumat în level1.onItemSelected
+        } else {
+            spinnerAutoSelect = false  // nu am găsit match, eliberăm flag-ul
+        }
     }
 
     // ── Zona selectată ────────────────────────────────────────────────────────
@@ -204,7 +258,7 @@ class MainActivity : AppCompatActivity() {
         zoneOutline?.let { map.overlays.remove(it) }
         zoneOutline = Polygon().apply {
             points = poly.map { GeoPoint(it[0], it[1]) }
-            fillPaint.color  = 0x3300FF88.toInt()
+            fillPaint.color    = 0x3300FF88.toInt()
             outlinePaint.color = 0xFFFF5252.toInt()
             outlinePaint.strokeWidth = 3f
         }
@@ -219,16 +273,16 @@ class MainActivity : AppCompatActivity() {
     // ── Preview traseu ────────────────────────────────────────────────────────
 
     private fun refreshPreview() {
-        routeSkipOverlay?.let { map.overlays.remove(it); routeSkipOverlay = null }
+        routeSkipOverlay?.let   { map.overlays.remove(it); routeSkipOverlay = null }
         routeActiveOverlay?.let { map.overlays.remove(it); routeActiveOverlay = null }
 
         val poly = selectedPoly ?: run { map.invalidate(); return }
-        val zone    = Zone.fromPolygon(poly)
-        val rowM    = maxOf(10.0, rowBar.progress.toDouble())
+        val zone     = Zone.fromPolygon(poly)
+        val rowM     = maxOf(10.0, rowBar.progress.toDouble())
         val skipFrac = posBar.progress / 100.0
 
         if (skipFrac > 0.0) {
-            val pts = RouteGenerator.computePreview(zone, rowM, 0.0, skipFrac)
+            val pts = RouteGenerator.computePreview(zone, rowM, 0.0, skipFrac, vertical = isVertical)
             if (pts.isNotEmpty()) {
                 routeSkipOverlay = Polyline().apply {
                     setPoints(pts.map { GeoPoint(it[0], it[1]) })
@@ -240,7 +294,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val activePts = RouteGenerator.computePreview(zone, rowM, skipFrac, 1.0)
+        val activePts = RouteGenerator.computePreview(zone, rowM, skipFrac, 1.0, vertical = isVertical)
         if (activePts.isNotEmpty()) {
             routeActiveOverlay = Polyline().apply {
                 setPoints(activePts.map { GeoPoint(it[0], it[1]) })
@@ -285,6 +339,10 @@ class MainActivity : AppCompatActivity() {
             controlPanel.visibility = if (show) View.VISIBLE else View.GONE
             btnToggle.text = if (show) "▼ ascunde" else "▲ arată controale"
         }
+        btnDirection.setOnCheckedChangeListener { _, checked ->
+            isVertical = checked
+            refreshPreview()
+        }
         findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
         findViewById<Button>(R.id.btnStop).setOnClickListener {
             startService(Intent(this, MockService::class.java).apply { action = MockService.ACTION_STOP })
@@ -304,15 +362,16 @@ class MainActivity : AppCompatActivity() {
         if (poly == null) { toast("Selectează o zonă mai întâi"); return }
 
         val i = Intent(this, MockService::class.java)
-        i.putExtra(MockService.EXTRA_SPEED_KMH,     speedBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_ROW_M,          rowBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_STEP_M,          75.0)
-        i.putExtra(MockService.EXTRA_VERTICAL,        false)
-        i.putExtra(MockService.EXTRA_LOOP,            true)
-        i.putExtra(MockService.EXTRA_SKIP_FRACTION,  posBar.progress / 100.0)
-        i.putExtra(MockService.EXTRA_POLY,           poly.joinToString(";") { "${it[0]},${it[1]}" })
+        i.putExtra(MockService.EXTRA_SPEED_KMH,    speedBar.progress.toDouble())
+        i.putExtra(MockService.EXTRA_ROW_M,         rowBar.progress.toDouble())
+        i.putExtra(MockService.EXTRA_STEP_M,         75.0)
+        i.putExtra(MockService.EXTRA_VERTICAL,       isVertical)
+        i.putExtra(MockService.EXTRA_LOOP,           true)
+        i.putExtra(MockService.EXTRA_SKIP_FRACTION, posBar.progress / 100.0)
+        i.putExtra(MockService.EXTRA_POLY,          poly.joinToString(";") { "${it[0]},${it[1]}" })
         startForegroundService(i)
-        toast("Pornit: $selectedName")
+        val dir = if (isVertical) "vertical" else "orizontal"
+        toast("Pornit $dir: $selectedName")
     }
 
     // ── Polling status & marker GPS ───────────────────────────────────────────

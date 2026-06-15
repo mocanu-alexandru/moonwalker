@@ -62,6 +62,18 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
 
+        <!-- Direcție scanare -->
+        <ToggleButton
+            android:id="@+id/btnDirection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textOff="↔ Orizontal (E-V)"
+            android:textOn="↕ Vertical (N-S)"
+            android:checked="false"
+            android:textSize="12sp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"

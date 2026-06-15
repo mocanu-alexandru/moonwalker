@@ -3,142 +3,159 @@ package com.alexmcn.moonwalker
 import kotlin.math.*
 
 /**
- * Generează coordonate live pentru o serpentină (boustrophedon) peste o zonă,
- * fără să stocheze fișiere. Cheamă next() repetat ca să obții următorul punct.
+ * Generează coordonate live pentru o serpentină (boustrophedon) peste o zonă.
  *
- * Optimizat pentru deblocare hexagoane ~150m (Țesătura/Bump):
- *  - rândurile sunt la pasul vertical al hexagonului (rowSpacingM)
- *  - pe fiecare rând, pași la stepM
- *  - point-in-polygon ca să nu iasă din zonă (sare segmentele din afară)
+ * vertical=false → rânduri E-V (orizontal, ca un TV raster)
+ * vertical=true  → coloane N-S (vertical, ca un aspirator/robot de gazon)
  */
 class RouteGenerator(
     private val zone: Zone,
-    private val rowSpacingM: Double = 130.0,   // distanța între rânduri (m)
-    private val stepM: Double = 75.0,          // pasul pe rând (m)
-    private val vertical: Boolean = false      // false = rânduri E-V, true = N-S
+    private val rowSpacingM: Double = 130.0,
+    private val stepM: Double = 75.0,
+    private val vertical: Boolean = false
 ) {
     private val M_LAT = 111_320.0
+    private val latCenter = (zone.latMin + zone.latMax) / 2.0
 
-    // bounding box al zonei
-    private val latMin = zone.latMin
-    private val latMax = zone.latMax
-    private val lonMin = zone.lonMin
-    private val lonMax = zone.lonMax
+    // spacing între linii (rând sau coloană) în coordonate geografice
+    private val dLatLine = rowSpacingM / M_LAT
+    private val dLonLine = rowSpacingM / (M_LAT * cos(Math.toRadians(latCenter)))
 
-    // starea serpentinei
-    private var rowIndex = 0
-    private var colInRow = 0
-    private var currentRowPoints: List<DoubleArray> = emptyList()
+    /** numărul total de linii (rânduri orizontale sau coloane verticale) */
+    private val nLines: Int = if (!vertical)
+        max(1, ((zone.latMax - zone.latMin) / dLatLine).toInt() + 1)
+    else
+        max(1, ((zone.lonMax - zone.lonMin) / dLonLine).toInt() + 1)
+
+    private var lineIndex = 0
+    private var colInLine = 0
+    private var currentLinePoints: List<DoubleArray> = emptyList()
     private var finished = false
 
-    private val dLatRow = rowSpacingM / M_LAT
+    init { buildLine(0) }
 
-    /** numărul total estimat de rânduri */
-    private val nRows = max(1, ((latMax - latMin) / dLatRow).toInt() + 1)
-
-    init {
-        buildRow(0)
-    }
-
-    /** construiește lista de puncte pentru un rând (deja filtrate prin point-in-polygon) */
-    private fun buildRow(idx: Int) {
-        if (idx >= nRows) { finished = true; currentRowPoints = emptyList(); return }
-        // de la NORD spre SUD
-        val lat = latMax - idx * dLatRow
-        val kLon = M_LAT * cos(Math.toRadians(lat))
-        val dLon = stepM / kLon
+    private fun buildLine(idx: Int) {
+        if (idx >= nLines) { finished = true; currentLinePoints = emptyList(); return }
         val pts = ArrayList<DoubleArray>()
-        var lon = lonMin
-        while (lon <= lonMax) {
-            if (zone.contains(lat, lon)) {
-                pts.add(doubleArrayOf(lat, lon))
+
+        if (!vertical) {
+            // Rând orizontal: latitudine fixă, pas pe longitudine
+            val lat = zone.latMax - idx * dLatLine
+            val kLon = M_LAT * cos(Math.toRadians(lat))
+            val dLonStep = stepM / kLon
+            var lon = zone.lonMin
+            while (lon <= zone.lonMax) {
+                if (zone.contains(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                lon += dLonStep
             }
-            lon += dLon
+        } else {
+            // Coloană verticală: longitudine fixă, pas pe latitudine
+            val lon = zone.lonMin + idx * dLonLine
+            val dLatStep = stepM / M_LAT
+            var lat = zone.latMax
+            while (lat >= zone.latMin) {
+                if (zone.contains(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                lat -= dLatStep
+            }
         }
-        // serpentină: rândurile impare le inversăm
+
+        // serpentină: liniile impare sunt parcurse în sens invers
         if (idx % 2 == 1) pts.reverse()
-        currentRowPoints = pts
-        colInRow = 0
-        // dacă rândul e gol (în afara poligonului), sari la următorul
-        if (pts.isEmpty() && idx + 1 < nRows) buildRow(idx + 1)
+        currentLinePoints = pts
+        colInLine = 0
+        // dacă linia e în afara poligonului, sari la următoarea
+        if (pts.isEmpty() && idx + 1 < nLines) buildLine(idx + 1)
     }
 
-    /** întoarce următoarea coordonată [lat, lon] sau null dacă s-a terminat zona */
     fun next(): DoubleArray? {
         if (finished) return null
-        while (colInRow >= currentRowPoints.size) {
-            rowIndex++
-            if (rowIndex >= nRows) { finished = true; return null }
-            buildRow(rowIndex)
+        while (colInLine >= currentLinePoints.size) {
+            lineIndex++
+            if (lineIndex >= nLines) { finished = true; return null }
+            buildLine(lineIndex)
             if (finished) return null
         }
-        val p = currentRowPoints[colInRow]
-        colInRow++
+        val p = currentLinePoints[colInLine]
+        colInLine++
         return p
     }
 
-    /** progres aproximativ 0..1 */
-    fun progress(): Double {
-        if (nRows == 0) return 1.0
-        return min(1.0, rowIndex.toDouble() / nRows)
-    }
-
+    fun progress(): Double = if (nLines == 0) 1.0 else min(1.0, lineIndex.toDouble() / nLines)
     fun isFinished() = finished
 
-    fun reset() {
-        rowIndex = 0; colInRow = 0; finished = false
-        buildRow(0)
-    }
+    fun reset() { lineIndex = 0; colInLine = 0; finished = false; buildLine(0) }
 
-    val totalRows: Int get() = nRows
+    val totalRows: Int get() = nLines
 
     fun seekToRow(n: Int) {
-        rowIndex = n.coerceIn(0, nRows - 1)
-        colInRow = 0
-        finished = false
-        buildRow(rowIndex)
+        lineIndex = n.coerceIn(0, nLines - 1)
+        colInLine = 0; finished = false
+        buildLine(lineIndex)
     }
 
     companion object {
         /**
-         * Generează punctele de capăt ale rândurilor pentru preview pe hartă (bbox-based,
-         * fără clipping la poligon — instantaneu, O(maxRows)).
-         * [fromFraction, toFraction] determină ce porțiune din traseu se returnează.
+         * Preview rapid al traseului (bbox-based, fără clipping la poligon).
+         * vertical=false → linii orizontale, vertical=true → coloane verticale.
          */
         fun computePreview(
             zone: Zone, rowM: Double,
             fromFraction: Double = 0.0, toFraction: Double = 1.0,
-            maxRows: Int = 500
+            maxRows: Int = 500,
+            vertical: Boolean = false
         ): List<DoubleArray> {
-            val dLatRow = rowM / 111_320.0
-            val nRows = max(1, ((zone.latMax - zone.latMin) / dLatRow).toInt() + 1)
-            val startRow = (fromFraction * nRows).toInt().coerceIn(0, nRows)
-            val endRow   = (toFraction   * nRows).toInt().coerceIn(0, nRows)
-            val range = endRow - startRow
-            if (range <= 0) return emptyList()
-            val step = max(1, range / maxRows)
-            val result = ArrayList<DoubleArray>((range / step + 1) * 2)
-            var idx = startRow
-            while (idx < endRow) {
-                val lat = zone.latMax - idx * dLatRow
-                if (idx % 2 == 0) {
-                    result.add(doubleArrayOf(lat, zone.lonMin))
-                    result.add(doubleArrayOf(lat, zone.lonMax))
-                } else {
-                    result.add(doubleArrayOf(lat, zone.lonMax))
-                    result.add(doubleArrayOf(lat, zone.lonMin))
+            if (!vertical) {
+                val dLatRow = rowM / 111_320.0
+                val nRows = max(1, ((zone.latMax - zone.latMin) / dLatRow).toInt() + 1)
+                val startRow = (fromFraction * nRows).toInt().coerceIn(0, nRows)
+                val endRow   = (toFraction   * nRows).toInt().coerceIn(0, nRows)
+                val range = endRow - startRow
+                if (range <= 0) return emptyList()
+                val step = max(1, range / maxRows)
+                val result = ArrayList<DoubleArray>((range / step + 1) * 2)
+                var idx = startRow
+                while (idx < endRow) {
+                    val lat = zone.latMax - idx * dLatRow
+                    if (idx % 2 == 0) {
+                        result.add(doubleArrayOf(lat, zone.lonMin))
+                        result.add(doubleArrayOf(lat, zone.lonMax))
+                    } else {
+                        result.add(doubleArrayOf(lat, zone.lonMax))
+                        result.add(doubleArrayOf(lat, zone.lonMin))
+                    }
+                    idx += step
                 }
-                idx += step
+                return result
+            } else {
+                val latCenter = (zone.latMin + zone.latMax) / 2.0
+                val dLon = rowM / (111_320.0 * cos(Math.toRadians(latCenter)))
+                val nCols = max(1, ((zone.lonMax - zone.lonMin) / dLon).toInt() + 1)
+                val startCol = (fromFraction * nCols).toInt().coerceIn(0, nCols)
+                val endCol   = (toFraction   * nCols).toInt().coerceIn(0, nCols)
+                val range = endCol - startCol
+                if (range <= 0) return emptyList()
+                val step = max(1, range / maxRows)
+                val result = ArrayList<DoubleArray>((range / step + 1) * 2)
+                var idx = startCol
+                while (idx < endCol) {
+                    val lon = zone.lonMin + idx * dLon
+                    if (idx % 2 == 0) {
+                        result.add(doubleArrayOf(zone.latMax, lon))
+                        result.add(doubleArrayOf(zone.latMin, lon))
+                    } else {
+                        result.add(doubleArrayOf(zone.latMin, lon))
+                        result.add(doubleArrayOf(zone.latMax, lon))
+                    }
+                    idx += step
+                }
+                return result
             }
-            return result
         }
 
-        /** distanță haversine în metri între două puncte [lat,lon] */
         fun haversine(a: DoubleArray, b: DoubleArray): Double {
             val R = 6_371_000.0
             val la1 = Math.toRadians(a[0]); val la2 = Math.toRadians(b[0])
-            val dLa = la2 - la1
-            val dLo = Math.toRadians(b[1] - a[1])
+            val dLa = la2 - la1; val dLo = Math.toRadians(b[1] - a[1])
             val h = sin(dLa/2).pow(2) + cos(la1)*cos(la2)*sin(dLo/2).pow(2)
             return 2 * R * asin(sqrt(h))
         }

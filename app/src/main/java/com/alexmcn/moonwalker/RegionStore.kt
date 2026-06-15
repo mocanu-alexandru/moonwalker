@@ -21,7 +21,12 @@ object RegionStore {
 
     data class Country(val name: String, val iso2: String, val iso3: String)
     data class Subdivision(val name: String, val parent: String = "", val poly: List<DoubleArray>)
-    data class TappedZone(val name: String, val poly: List<DoubleArray>?)
+    data class TappedZone(
+        val name: String,
+        val poly: List<DoubleArray>?,
+        val countryCode: String?,  // ISO 3166-1 alpha-2 lowercase, e.g. "ro"
+        val level1Name: String?    // regiune/județ din adresa Nominatim
+    )
 
     val EUROPE: List<Country> = listOf(
         Country("Albania",                  "AL", "ALB"),
@@ -122,9 +127,13 @@ object RegionStore {
                 val json = JSONObject(conn.inputStream.bufferedReader().readText())
                 conn.disconnect()
                 val name = json.optString("display_name", "?").split(",").first().trim()
+                val address = json.optJSONObject("address")
+                val countryCode = address?.optString("country_code")?.takeIf { it.isNotEmpty() }
+                val level1Name = listOf("state", "region", "province", "county", "state_district")
+                    .firstNotNullOfOrNull { k -> address?.optString(k)?.takeIf { it.isNotEmpty() } }
                 val geo  = json.optJSONObject("geojson")
                 val poly = if (geo != null) simplify(extractLargestPoly(geo) ?: emptyList(), 300) else null
-                callback(TappedZone(name, poly?.takeIf { it.isNotEmpty() }))
+                callback(TappedZone(name, poly?.takeIf { it.isNotEmpty() }, countryCode, level1Name))
             } catch (e: Exception) { callback(null) }
         }.start()
     }
@@ -207,8 +216,13 @@ object RegionStore {
         return result
     }
 
-    /** Normalizează pentru comparare: minuscule, fără diacritice */
-    private fun String.norm() = lowercase()
+    /** Normalizează pentru comparare internă (filtrare nivel 2 după nivel 1) */
+    private fun String.norm() = normForMatch()
+
+    /** Normalizează pentru matching UI: minuscule, fără diacritice, fără sufixe gen "County" */
+    fun String.normForMatch() = lowercase()
         .replace('ș', 's').replace('ş', 's').replace('ț', 't').replace('ţ', 't')
         .replace('ă', 'a').replace('â', 'a').replace('î', 'i')
+        .replace(Regex("\\s+(county|judet|judeţ|județ|department|département|région|region|oblast|province|provincia)\\s*$"), "")
+        .trim()
 }
