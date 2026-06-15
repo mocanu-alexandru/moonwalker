@@ -74,13 +74,15 @@ class MainActivity : AppCompatActivity() {
         speedLbl.text = "Viteză: 120 km/h"
         rowLbl.text = "Distanță rânduri: 130 m"
 
-        // desen pe hartă
+        // desen pe hartă + tap județ
         val receiver = object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
-                if (modeSpinner.selectedItemPosition == 2 && p != null) {
-                    drawnPoints.add(p); redrawDrawn()
+                if (p == null) return false
+                when (modeSpinner.selectedItemPosition) {
+                    1 -> selectCountyAtPoint(p.latitude, p.longitude)
+                    2 -> { drawnPoints.add(p); redrawDrawn() }
                 }
-                return false
+                return true
             }
             override fun longPressHelper(p: GeoPoint?): Boolean { return false }
         }
@@ -183,16 +185,18 @@ class MainActivity : AppCompatActivity() {
                 if (running && lat != 0.0) {
                     if (curMarker == null) {
                         curMarker = Marker(map).apply {
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            icon = makeDotIcon()
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                             map.overlays.add(this)
                         }
                     }
                     curMarker!!.position = GeoPoint(lat, lon)
+                    map.invalidate()
                 } else if (!running && curMarker != null) {
                     map.overlays.remove(curMarker)
                     curMarker = null
+                    map.invalidate()
                 }
-                map.invalidate()
 
                 ui.postDelayed(this, 1000)
             }
@@ -206,6 +210,29 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (need.isNotEmpty()) ActivityCompat.requestPermissions(this, need.toTypedArray(), 1)
+    }
+
+    private fun selectCountyAtPoint(lat: Double, lon: Double) {
+        val names = Counties.names()
+        val name = names.firstOrNull { n ->
+            val poly = Counties.polygon(n) ?: return@firstOrNull false
+            Zone.fromPolygon(poly).contains(lat, lon)
+        } ?: return
+        val idx = names.indexOf(name)
+        if (idx >= 0) countySpinner.setSelection(idx)
+    }
+
+    private fun makeDotIcon(): android.graphics.drawable.BitmapDrawable {
+        val px = (20 * resources.displayMetrics.density).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(bmp).also { cv ->
+            val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+            p.color = 0xFF1565C0.toInt()
+            cv.drawCircle(px / 2f, px / 2f, px / 2f * 0.9f, p)
+            p.color = 0xFFFFFFFF.toInt()
+            cv.drawCircle(px / 2f, px / 2f, px / 2f * 0.35f, p)
+        }
+        return android.graphics.drawable.BitmapDrawable(resources, bmp)
     }
 
     private fun simpleSeek(onChange: () -> Unit) = object : SeekBar.OnSeekBarChangeListener {
