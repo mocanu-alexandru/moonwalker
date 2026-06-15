@@ -90,7 +90,49 @@ class RouteGenerator(
         buildRow(0)
     }
 
+    val totalRows: Int get() = nRows
+
+    fun seekToRow(n: Int) {
+        rowIndex = n.coerceIn(0, nRows - 1)
+        colInRow = 0
+        finished = false
+        buildRow(rowIndex)
+    }
+
     companion object {
+        /**
+         * Generează punctele de capăt ale rândurilor pentru preview pe hartă (bbox-based,
+         * fără clipping la poligon — instantaneu, O(maxRows)).
+         * [fromFraction, toFraction] determină ce porțiune din traseu se returnează.
+         */
+        fun computePreview(
+            zone: Zone, rowM: Double,
+            fromFraction: Double = 0.0, toFraction: Double = 1.0,
+            maxRows: Int = 500
+        ): List<DoubleArray> {
+            val dLatRow = rowM / 111_320.0
+            val nRows = max(1, ((zone.latMax - zone.latMin) / dLatRow).toInt() + 1)
+            val startRow = (fromFraction * nRows).toInt().coerceIn(0, nRows)
+            val endRow   = (toFraction   * nRows).toInt().coerceIn(0, nRows)
+            val range = endRow - startRow
+            if (range <= 0) return emptyList()
+            val step = max(1, range / maxRows)
+            val result = ArrayList<DoubleArray>((range / step + 1) * 2)
+            var idx = startRow
+            while (idx < endRow) {
+                val lat = zone.latMax - idx * dLatRow
+                if (idx % 2 == 0) {
+                    result.add(doubleArrayOf(lat, zone.lonMin))
+                    result.add(doubleArrayOf(lat, zone.lonMax))
+                } else {
+                    result.add(doubleArrayOf(lat, zone.lonMax))
+                    result.add(doubleArrayOf(lat, zone.lonMin))
+                }
+                idx += step
+            }
+            return result
+        }
+
         /** distanță haversine în metri între două puncte [lat,lon] */
         fun haversine(a: DoubleArray, b: DoubleArray): Double {
             val R = 6_371_000.0

@@ -30,6 +30,7 @@ class MockService : Service() {
         const val EXTRA_SPEED_KMH = "speed"
         const val EXTRA_ROW_M = "rowM"; const val EXTRA_STEP_M = "stepM"
         const val EXTRA_VERTICAL = "vertical"; const val EXTRA_LOOP = "loop"
+        const val EXTRA_SKIP_FRACTION = "skipFraction"
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"
 
         // stare observabilă pentru UI
@@ -62,6 +63,7 @@ class MockService : Service() {
         val stepM = intent?.getDoubleExtra(EXTRA_STEP_M, 75.0) ?: 75.0
         val vertical = intent?.getBooleanExtra(EXTRA_VERTICAL, false) ?: false
         val loop = intent?.getBooleanExtra(EXTRA_LOOP, true) ?: true
+        val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         val zone: Zone = if (polyStr != null && polyStr.isNotBlank()) {
@@ -80,13 +82,13 @@ class MockService : Service() {
         }
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
-        startWalking(zone, speed, rowM, stepM, vertical, loop)
+        startWalking(zone, speed, rowM, stepM, vertical, loop, skipFraction)
         return START_STICKY
     }
 
     private fun startWalking(
         zone: Zone, speedKmh: Double, rowM: Double, stepM: Double,
-        vertical: Boolean, loop: Boolean
+        vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0
     ) {
         stopFlag = false
         running = true
@@ -109,6 +111,7 @@ class MockService : Service() {
 
         thread = Thread {
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
+            if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
             val tickMs = 1000L                 // o injecție pe secundă
             val metersPerTick = speedKmh * 1000.0 / 3600.0  // m parcurși/tick la viteza dată
             var prev: DoubleArray? = null

@@ -11,67 +11,93 @@
         android:layout_height="0dp"
         android:layout_weight="1" />
 
-    <TextView
-        android:id="@+id/status"
+    <!-- Toggle vizibilitate panou controale -->
+    <Button
+        android:id="@+id/btnToggle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="6dp"
-        android:textSize="13sp"
-        android:text="○ oprit" />
+        android:text="▼ ascunde"
+        android:textSize="11sp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        style="?attr/borderlessButtonStyle" />
 
+    <!-- Panou controale - colapsibil -->
     <LinearLayout
-        android:orientation="horizontal"
+        android:id="@+id/controlPanel"
+        android:orientation="vertical"
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
-        <Spinner android:id="@+id/modeSpinner"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" />
-        <Spinner android:id="@+id/countySpinner"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" />
-    </LinearLayout>
 
-    <TextView android:id="@+id/speedLbl"
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:text="Viteză: 120 km/h" android:textSize="12sp" />
-    <SeekBar android:id="@+id/speedBar"
-        android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-    <TextView android:id="@+id/rowLbl"
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:text="Distanță rânduri: 130 m" android:textSize="12sp" />
-    <SeekBar android:id="@+id/rowBar"
-        android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-    <LinearLayout
-        android:orientation="horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-        <Button android:id="@+id/btnStart"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" android:text="START" />
-        <Button android:id="@+id/btnStop"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" android:text="STOP" />
-        <Button android:id="@+id/btnClear"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" android:text="Șterge desen" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:orientation="horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-        <Button android:id="@+id/btnMock"
-            android:layout_width="0dp" android:layout_weight="1"
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Developer Options"
-            android:textSize="11sp" />
-        <Button android:id="@+id/btnUpdate"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="Verifică update"
-            android:textSize="11sp" />
+            android:padding="6dp"
+            android:textSize="13sp"
+            android:text="○ oprit" />
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Spinner android:id="@+id/modeSpinner"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" />
+            <Spinner android:id="@+id/countySpinner"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <TextView android:id="@+id/speedLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Viteză: 120 km/h" android:textSize="12sp" />
+        <SeekBar android:id="@+id/speedBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/rowLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Distanță rânduri: 130 m" android:textSize="12sp" />
+        <SeekBar android:id="@+id/rowBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/posLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Start din: 0%" android:textSize="12sp" />
+        <SeekBar android:id="@+id/posBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Button android:id="@+id/btnStart"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="START" />
+            <Button android:id="@+id/btnStop"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="STOP" />
+            <Button android:id="@+id/btnClear"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Șterge desen" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Button android:id="@+id/btnMock"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Developer Options"
+                android:textSize="11sp" />
+            <Button android:id="@+id/btnUpdate"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Verifică update"
+                android:textSize="11sp" />
+        </LinearLayout>
+
     </LinearLayout>
 
 </LinearLayout>

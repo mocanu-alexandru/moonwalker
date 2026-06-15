@@ -4,10 +4,14 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.*
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import org.osmdroid.config.Configuration
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -23,14 +27,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var speedBar: SeekBar
     private lateinit var rowBar: SeekBar
+    private lateinit var posBar: SeekBar
     private lateinit var speedLbl: TextView
     private lateinit var rowLbl: TextView
+    private lateinit var posLbl: TextView
     private lateinit var countySpinner: Spinner
     private lateinit var modeSpinner: Spinner
+    private lateinit var controlPanel: LinearLayout
+    private lateinit var btnToggle: Button
 
     private val drawnPoints = ArrayList<GeoPoint>()
     private var drawnPolyOverlay: Polygon? = null
     private var curMarker: Marker? = null
+    private var routeSkipOverlay: Polyline? = null
+    private var routeActiveOverlay: Polyline? = null
     private val ui = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,39 +52,69 @@ class MainActivity : AppCompatActivity() {
         map.setTileSource(TileSourceFactory.MAPNIK)
         map.setMultiTouchControls(true)
         map.controller.setZoom(8.0)
-        map.controller.setCenter(GeoPoint(47.15, 27.52))  // Iași default
+        map.controller.setCenter(GeoPoint(47.15, 27.52))
 
         status = findViewById(R.id.status)
         speedBar = findViewById(R.id.speedBar)
         rowBar = findViewById(R.id.rowBar)
+        posBar = findViewById(R.id.posBar)
         speedLbl = findViewById(R.id.speedLbl)
         rowLbl = findViewById(R.id.rowLbl)
+        posLbl = findViewById(R.id.posLbl)
         countySpinner = findViewById(R.id.countySpinner)
         modeSpinner = findViewById(R.id.modeSpinner)
+        controlPanel = findViewById(R.id.controlPanel)
+        btnToggle = findViewById(R.id.btnToggle)
 
-        // moduri de definire zonă
         modeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
             listOf("Vizibil pe hartă (bbox)", "Județ din listă", "Desenez pe hartă"))
-
-        // listă județe
-        countySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            Counties.names())
-        countySpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: android.view.View?, pos: Int, id: Long) {
-                showCountyOnMap(Counties.names()[pos])
+        modeSpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                refreshPreview()
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         })
 
-        // sliders
+        countySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
+            Counties.names())
+        countySpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                showCountyOnMap(Counties.names()[pos])
+                refreshPreview()
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        })
+
         speedBar.max = 1000; speedBar.progress = 120
-        rowBar.max = 300; rowBar.progress = 130
+        rowBar.max = 300;    rowBar.progress = 130
+        posBar.max = 100;    posBar.progress = 0
+
         speedBar.setOnSeekBarChangeListener(simpleSeek { speedLbl.text = "Viteză: ${speedBar.progress} km/h" })
-        rowBar.setOnSeekBarChangeListener(simpleSeek { rowLbl.text = "Distanță rânduri: ${rowBar.progress} m" })
+        rowBar.setOnSeekBarChangeListener(simpleSeek {
+            rowLbl.text = "Distanță rânduri: ${rowBar.progress} m"
+            refreshPreview()
+        })
+        posBar.setOnSeekBarChangeListener(simpleSeek {
+            posLbl.text = "Start din: ${posBar.progress}%"
+            refreshPreview()
+        })
+
         speedLbl.text = "Viteză: 120 km/h"
         rowLbl.text = "Distanță rânduri: 130 m"
+        posLbl.text = "Start din: 0%"
 
-        // desen pe hartă + tap județ
+        // Actualizează preview când harta se mișcă (mod bbox)
+        map.addMapListener(object : MapListener {
+            override fun onScroll(event: ScrollEvent?): Boolean {
+                if (modeSpinner.selectedItemPosition == 0) refreshPreview()
+                return false
+            }
+            override fun onZoom(event: ZoomEvent?): Boolean {
+                if (modeSpinner.selectedItemPosition == 0) refreshPreview()
+                return false
+            }
+        })
+
         val receiver = object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
                 if (p == null) return false
@@ -88,8 +128,16 @@ class MainActivity : AppCompatActivity() {
         }
         map.overlays.add(MapEventsOverlay(receiver))
 
+        btnToggle.setOnClickListener {
+            val show = controlPanel.visibility == View.GONE
+            controlPanel.visibility = if (show) View.VISIBLE else View.GONE
+            btnToggle.text = if (show) "▼ ascunde" else "▲ arată controale"
+        }
+
         findViewById<Button>(R.id.btnClear).setOnClickListener {
-            drawnPoints.clear(); drawnPolyOverlay?.let { map.overlays.remove(it) }; map.invalidate()
+            drawnPoints.clear()
+            drawnPolyOverlay?.let { map.overlays.remove(it) }
+            map.invalidate()
         }
         findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
         findViewById<Button>(R.id.btnStop).setOnClickListener { stopService() }
@@ -104,6 +152,50 @@ class MainActivity : AppCompatActivity() {
         pollStatus()
     }
 
+    private fun currentZone(): Zone? {
+        return when (modeSpinner.selectedItemPosition) {
+            0 -> map.boundingBox.let { Zone.fromBbox(it.latSouth, it.latNorth, it.lonWest, it.lonEast) }
+            1 -> Counties.polygon(countySpinner.selectedItem as? String ?: return null)
+                    ?.let { Zone.fromPolygon(it) }
+            else -> null
+        }
+    }
+
+    private fun refreshPreview() {
+        routeSkipOverlay?.let { map.overlays.remove(it); routeSkipOverlay = null }
+        routeActiveOverlay?.let { map.overlays.remove(it); routeActiveOverlay = null }
+
+        val zone = currentZone() ?: run { map.invalidate(); return }
+        val rowM = maxOf(10.0, rowBar.progress.toDouble())
+        val skipFrac = posBar.progress.toDouble() / 100.0
+
+        if (skipFrac > 0.0) {
+            val pts = RouteGenerator.computePreview(zone, rowM, 0.0, skipFrac)
+            if (pts.isNotEmpty()) {
+                routeSkipOverlay = Polyline().apply {
+                    setPoints(pts.map { GeoPoint(it[0], it[1]) })
+                    outlinePaint.color = 0xFF888888.toInt()
+                    outlinePaint.strokeWidth = 1.0f
+                    outlinePaint.alpha = 80
+                }
+                map.overlays.add(routeSkipOverlay)
+            }
+        }
+
+        val activePts = RouteGenerator.computePreview(zone, rowM, skipFrac, 1.0)
+        if (activePts.isNotEmpty()) {
+            routeActiveOverlay = Polyline().apply {
+                setPoints(activePts.map { GeoPoint(it[0], it[1]) })
+                outlinePaint.color = 0xFF1565C0.toInt()
+                outlinePaint.strokeWidth = 1.5f
+                outlinePaint.alpha = 200
+            }
+            map.overlays.add(routeActiveOverlay)
+        }
+
+        map.invalidate()
+    }
+
     private fun showCountyOnMap(name: String) {
         val poly = Counties.polygon(name) ?: return
         map.overlays.removeAll { it is Polygon && it != drawnPolyOverlay }
@@ -114,8 +206,8 @@ class MainActivity : AppCompatActivity() {
             outlinePaint.strokeWidth = 4f
         }
         map.overlays.add(p)
-        // centrează
-        val cLat = poly.map { it[0] }.average(); val cLon = poly.map { it[1] }.average()
+        val cLat = poly.map { it[0] }.average()
+        val cLon = poly.map { it[1] }.average()
         map.controller.animateTo(GeoPoint(cLat, cLon))
         map.invalidate()
     }
@@ -134,6 +226,16 @@ class MainActivity : AppCompatActivity() {
         map.invalidate()
     }
 
+    private fun selectCountyAtPoint(lat: Double, lon: Double) {
+        val names = Counties.names()
+        val name = names.firstOrNull { n ->
+            val poly = Counties.polygon(n) ?: return@firstOrNull false
+            Zone.fromPolygon(poly).contains(lat, lon)
+        } ?: return
+        val idx = names.indexOf(name)
+        if (idx >= 0) countySpinner.setSelection(idx)
+    }
+
     private fun startService() {
         val i = Intent(this, MockService::class.java)
         i.putExtra(MockService.EXTRA_SPEED_KMH, speedBar.progress.toDouble())
@@ -141,21 +243,22 @@ class MainActivity : AppCompatActivity() {
         i.putExtra(MockService.EXTRA_STEP_M, 75.0)
         i.putExtra(MockService.EXTRA_VERTICAL, false)
         i.putExtra(MockService.EXTRA_LOOP, true)
+        i.putExtra(MockService.EXTRA_SKIP_FRACTION, posBar.progress.toDouble() / 100.0)
 
         when (modeSpinner.selectedItemPosition) {
-            0 -> { // bbox din ce e vizibil pe hartă
+            0 -> {
                 val bb = map.boundingBox
                 i.putExtra(MockService.EXTRA_LAT_MIN, bb.latSouth)
                 i.putExtra(MockService.EXTRA_LAT_MAX, bb.latNorth)
                 i.putExtra(MockService.EXTRA_LON_MIN, bb.lonWest)
                 i.putExtra(MockService.EXTRA_LON_MAX, bb.lonEast)
             }
-            1 -> { // județ
+            1 -> {
                 val poly = Counties.polygon(countySpinner.selectedItem as String)
                 if (poly != null) i.putExtra(MockService.EXTRA_POLY,
                     poly.joinToString(";") { "${it[0]},${it[1]}" })
             }
-            2 -> { // desen
+            2 -> {
                 if (drawnPoints.size < 3) { toast("Desenează cel puțin 3 puncte"); return }
                 i.putExtra(MockService.EXTRA_POLY,
                     drawnPoints.joinToString(";") { "${it.latitude},${it.longitude}" })
@@ -210,16 +313,6 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (need.isNotEmpty()) ActivityCompat.requestPermissions(this, need.toTypedArray(), 1)
-    }
-
-    private fun selectCountyAtPoint(lat: Double, lon: Double) {
-        val names = Counties.names()
-        val name = names.firstOrNull { n ->
-            val poly = Counties.polygon(n) ?: return@firstOrNull false
-            Zone.fromPolygon(poly).contains(lat, lon)
-        } ?: return
-        val idx = names.indexOf(name)
-        if (idx >= 0) countySpinner.setSelection(idx)
     }
 
     private fun makeDotIcon(): android.graphics.drawable.BitmapDrawable {
