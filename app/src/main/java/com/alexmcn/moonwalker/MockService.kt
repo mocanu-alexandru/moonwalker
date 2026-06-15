@@ -8,8 +8,6 @@ import android.location.LocationManager
 import android.location.provider.ProviderProperties
 import android.os.*
 import androidx.core.app.NotificationCompat
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationServices
 import kotlin.math.*
 
 /**
@@ -46,7 +44,6 @@ class MockService : Service() {
     }
 
     private lateinit var lm: LocationManager
-    private lateinit var fusedClient: FusedLocationProviderClient
     // Lista efectivă de provideri activi — construită dinamic la fiecare start
     private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
@@ -57,7 +54,6 @@ class MockService : Service() {
     override fun onCreate() {
         super.onCreate()
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        fusedClient = LocationServices.getFusedLocationProviderClient(this)
         createChannel()
     }
 
@@ -141,17 +137,9 @@ class MockService : Service() {
             }
         } catch (_: Exception) {}
 
-        // setMockMode pe main thread (are Looper) — nu în background thread cu Tasks.await
-        fusedClient.setMockMode(true)
-            .addOnSuccessListener { flpActive = true }
-            .addOnFailureListener { e ->
-                flpActive = false
-                statusText = "⚠ FLP: ${e.javaClass.simpleName}"
-            }
+        flpActive = true  // LocationManager mock activ
 
         thread = Thread {
-            // Pauză scurtă ca FLP să activeze mock mode înainte de prima injecție
-            try { Thread.sleep(1000) } catch (_: InterruptedException) {}
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
@@ -246,47 +234,28 @@ class MockService : Service() {
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
+        // Acuratețe 0.5m > WiFi real (~15-30m) → FLP preferă GPS-ul nostru în fuzionare normală.
+        // Fără setMockMode, output-ul FLP NU are isMock=true → Bump și Maps acceptă locația.
         for (p in activeProviders) {
             try {
                 val loc = Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
-                    accuracy = 3.0f
+                    accuracy = 0.5f
                     time = now; elapsedRealtimeNanos = elapsed
                     speed = (speedKmh / 3.6).toFloat()
                     bearingAccuracyDegrees = 1.0f
-                    speedAccuracyMetersPerSecond = 1.0f
-                    verticalAccuracyMeters = 1.0f
+                    speedAccuracyMetersPerSecond = 0.1f
+                    verticalAccuracyMeters = 0.5f
                 }
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
         }
-        // Injectăm în FLP cu flag isMock șters via reflection.
-        // LocationManager re-setează flag-ul automat (nu putem evita),
-        // dar GMS/FLP respectă valoarea din obiect → apps văd locație non-mock.
-        try {
-            val flpLoc = Location(LocationManager.GPS_PROVIDER).apply {
-                latitude = lat; longitude = lon; altitude = 100.0
-                accuracy = 3.0f
-                time = now; elapsedRealtimeNanos = elapsed
-                speed = (speedKmh / 3.6).toFloat()
-                bearingAccuracyDegrees = 1.0f
-                speedAccuracyMetersPerSecond = 1.0f
-                verticalAccuracyMeters = 1.0f
-            }
-            try {
-                val f = Location::class.java.getDeclaredField("mIsFromMockProvider")
-                f.isAccessible = true
-                f.set(flpLoc, false)
-            } catch (_: Exception) {}
-            fusedClient.setMockLocation(flpLoc)
-        } catch (_: Exception) {}
     }
 
     private fun stopEverything() {
         stopFlag = true
         running = false
         flpActive = false
-        try { fusedClient.setMockMode(false) } catch (_: Exception) {}
         for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
