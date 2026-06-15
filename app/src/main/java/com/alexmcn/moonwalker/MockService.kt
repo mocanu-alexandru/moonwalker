@@ -8,6 +8,9 @@ import android.location.LocationManager
 import android.location.provider.ProviderProperties
 import android.os.*
 import androidx.core.app.NotificationCompat
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.tasks.Tasks
 import kotlin.math.*
 
 /**
@@ -43,6 +46,7 @@ class MockService : Service() {
     }
 
     private lateinit var lm: LocationManager
+    private lateinit var fusedClient: FusedLocationProviderClient
     // Injectăm în ambii provideri ca să prevenim jumpingul între GPS fake și NETWORK real
     private val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
     private var thread: Thread? = null
@@ -53,6 +57,7 @@ class MockService : Service() {
     override fun onCreate() {
         super.onCreate()
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        fusedClient = LocationServices.getFusedLocationProviderClient(this)
         createChannel()
     }
 
@@ -123,6 +128,9 @@ class MockService : Service() {
         }
 
         thread = Thread {
+            // Dezactivăm sursele WiFi/cell din FLP — altfel FLP alternează între mock și locația reală WiFi
+            try { Tasks.await(fusedClient.setMockMode(true)) } catch (_: Exception) {}
+
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
             val tickMs = 1000L / tickHz        // ms între injecții
@@ -230,11 +238,24 @@ class MockService : Service() {
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
         }
+        // Injectăm și în FLP direct — suprascrie scanarea WiFi internă a Google Play Services
+        try {
+            fusedClient.setMockLocation(Location(LocationManager.GPS_PROVIDER).apply {
+                latitude = lat; longitude = lon; altitude = 100.0
+                accuracy = 3.0f
+                time = now; elapsedRealtimeNanos = elapsed
+                speed = (speedKmh / 3.6).toFloat()
+                bearingAccuracyDegrees = 1.0f
+                speedAccuracyMetersPerSecond = 1.0f
+                verticalAccuracyMeters = 1.0f
+            })
+        } catch (_: Exception) {}
     }
 
     private fun stopEverything() {
         stopFlag = true
         running = false
+        try { fusedClient.setMockMode(false) } catch (_: Exception) {}
         for (p in providers) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
