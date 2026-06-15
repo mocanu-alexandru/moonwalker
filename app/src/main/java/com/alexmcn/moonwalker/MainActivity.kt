@@ -10,6 +10,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.events.MapListener
+import org.osmdroid.events.ScrollEvent
+import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -107,13 +110,10 @@ class MainActivity : AppCompatActivity() {
                 RegionStore.reverseGeocode(p.latitude, p.longitude, map.zoomLevelDouble) { zone ->
                     runOnUiThread {
                         if (zone?.poly != null) {
-                            // Setăm zona cu poligonul Nominatim (mai precis)
                             setZone(zone.name, zone.poly)
-                            // Tentativă auto-select în spinere (nu suprascrie zona)
                             autoSelectSpinners(zone.countryCode, zone.level1Name)
                         } else {
-                            zoneLbl.text = if (selectedName.isNotEmpty()) selectedName
-                                           else "Apasă pe hartă sau alege din liste"
+                            updateTapHint()
                             toast("Nu s-a putut detecta zona (necesită internet)")
                         }
                     }
@@ -123,6 +123,16 @@ class MainActivity : AppCompatActivity() {
             override fun longPressHelper(p: GeoPoint?) = false
         }
         map.overlays.add(MapEventsOverlay(receiver))
+
+        // Actualizează hint-ul în zoneLbl când zoom-ul se schimbă (doar dacă nu e selectată o zonă)
+        map.addMapListener(object : MapListener {
+            override fun onScroll(e: ScrollEvent?) = false
+            override fun onZoom(e: ZoomEvent?): Boolean {
+                if (selectedName.isEmpty()) updateTapHint()
+                return false
+            }
+        })
+        updateTapHint()
     }
 
     // ── Spinere ierarhice ─────────────────────────────────────────────────────
@@ -142,6 +152,11 @@ class MainActivity : AppCompatActivity() {
                 if (pos == 0) {
                     level1Spinner.adapter = spinnerAdapter(listOf("— alege —"))
                     level2Spinner.adapter = spinnerAdapter(listOf("—"))
+                    selectedName = ""; selectedPoly = null
+                    zoneOutline?.let { map.overlays.remove(it) }; zoneOutline = null
+                    routeSkipOverlay?.let { map.overlays.remove(it) }; routeSkipOverlay = null
+                    routeActiveOverlay?.let { map.overlays.remove(it) }; routeActiveOverlay = null
+                    map.invalidate(); updateTapHint()
                     return
                 }
                 val country = RegionStore.EUROPE[pos - 1]
@@ -452,6 +467,18 @@ class MainActivity : AppCompatActivity() {
         override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = onChange()
         override fun onStartTrackingTouch(s: SeekBar?) {}
         override fun onStopTrackingTouch(s: SeekBar?) {}
+    }
+
+    private fun updateTapHint() {
+        val level = when {
+            map.zoomLevelDouble < 6  -> "țară"
+            map.zoomLevelDouble < 8  -> "regiune"
+            map.zoomLevelDouble < 10 -> "județ / district"
+            map.zoomLevelDouble < 12 -> "oraș"
+            map.zoomLevelDouble < 14 -> "comună / sat"
+            else                     -> "cartier / stradă"
+        }
+        zoneLbl.text = "Apasă pe hartă → $level"
     }
 
     private fun showVersion() {

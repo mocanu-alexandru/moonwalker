@@ -115,13 +115,16 @@ object RegionStore {
      * zoom < 7 → țară, 7-8 → regiune, 9-10 → județ, 11-12 → oraș, 13-14 → sat, 15+ → cartier
      */
     fun reverseGeocode(lat: Double, lon: Double, mapZoom: Double, callback: (TappedZone?) -> Unit) {
+        // Nominatim zoom: 3=țară, 5=regiune mare, 8=județ, 10=oraș, 12=comună, 14=cartier, 16=stradă
+        // OSM/osmdroid zoom 5-6 → vedem o țară întreagă → vrem Nominatim 3-4
         val nomZoom = when {
-            mapZoom < 7  -> 6
-            mapZoom < 9  -> 8
-            mapZoom < 11 -> 10
-            mapZoom < 13 -> 12
-            mapZoom < 15 -> 14
-            else         -> 16
+            mapZoom < 6  -> 3   // zoom ≤5: vizibil continent/țară → returnează țara
+            mapZoom < 8  -> 5   // zoom 6-7: vizibil țară/regiune mare → returnează regiune
+            mapZoom < 10 -> 8   // zoom 8-9: vizibil județ → returnează județ/district
+            mapZoom < 12 -> 10  // zoom 10-11: vizibil oraș → returnează oraș
+            mapZoom < 14 -> 12  // zoom 12-13: vizibil comună → returnează comună
+            mapZoom < 16 -> 14  // zoom 14-15: cartier/sat
+            else         -> 16  // zoom 16+: stradă
         }
         Thread {
             try {
