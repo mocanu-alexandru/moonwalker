@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="8dp">
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <org.osmdroid.views.MapView
+            android:id="@+id/map"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <ImageButton
+            android:id="@+id/btnHome"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="14dp"
+            android:src="@android:drawable/ic_menu_mylocation"
+            android:background="#DDFFFFFF"
+            android:scaleType="centerInside"
+            android:contentDescription="Acasă" />
+
+    </FrameLayout>
+
+    <!-- Toggle vizibilitate panou controale -->
+    <Button
+        android:id="@+id/btnToggle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="▼ ascunde"
+        android:textSize="11sp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        style="?attr/borderlessButtonStyle" />
+
+    <!-- Panou controale - colapsibil -->
+    <LinearLayout
+        android:id="@+id/controlPanel"
+        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <!-- Zona curent selectată -->
+        <TextView
+            android:id="@+id/zoneLbl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:text="Apasă pe hartă sau alege din liste" />
+
+        <!-- Rând 1: Țară + Regiune/Nivel1 -->
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Spinner
+                android:id="@+id/countrySpinner"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content" />
+            <Spinner
+                android:id="@+id/level1Spinner"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Rând 2: Județ/Departament/Nivel2 (full width) -->
+        <Spinner
+            android:id="@+id/level2Spinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <!-- Direcție scanare -->
+        <ToggleButton
+            android:id="@+id/btnDirection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textOff="↔ Orizontal (E-V)"
+            android:textOn="↕ Vertical (N-S)"
+            android:checked="false"
+            android:textSize="12sp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp" />
+
+        <TextView
+            android:id="@+id/permsLbl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:textSize="12sp"
+            android:text="○ oprit" />
+
+        <TextView android:id="@+id/hzLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Frecvență: 1 inj/s → 270 km/h virtual" android:textSize="12sp" />
+        <SeekBar android:id="@+id/hzBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/rowLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Distanță rânduri: 100 m" android:textSize="12sp" />
+        <SeekBar android:id="@+id/rowBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/stepLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Pas pe rând: 10 m" android:textSize="12sp" />
+        <SeekBar android:id="@+id/stepBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:id="@+id/posLbl"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Start din: 0%" android:textSize="12sp" />
+        <SeekBar android:id="@+id/posBar"
+            android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <Button android:id="@+id/btnOptim"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="⚡ Setări optime — acoperire 100% (Bump)"
+            android:textSize="12sp"
+            android:paddingTop="2dp" android:paddingBottom="2dp" />
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Button android:id="@+id/btnStart"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="START" />
+            <Button android:id="@+id/btnStop"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="STOP" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Button android:id="@+id/btnMock"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Developer Options"
+                android:textSize="11sp" />
+            <Button android:id="@+id/btnUpdate"
+                android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Verifică update"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/versionTv"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="v1.0.0"
+        android:textSize="10sp"
+        android:textColor="#888888"
+        android:gravity="center"
+        android:paddingBottom="2dp" />
+
+</LinearLayout>
