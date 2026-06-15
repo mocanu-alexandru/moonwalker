@@ -29,25 +29,46 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
+        <!-- Zona curent selectată -->
+        <TextView
+            android:id="@+id/zoneLbl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:text="Apasă pe hartă sau alege din liste" />
+
+        <!-- Rând 1: Țară + Regiune/Nivel1 -->
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <Spinner
+                android:id="@+id/countrySpinner"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content" />
+            <Spinner
+                android:id="@+id/level1Spinner"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Rând 2: Județ/Departament/Nivel2 (full width) -->
+        <Spinner
+            android:id="@+id/level2Spinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:padding="6dp"
-            android:textSize="13sp"
+            android:textSize="12sp"
             android:text="○ oprit" />
-
-        <LinearLayout
-            android:orientation="horizontal"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content">
-            <Spinner android:id="@+id/modeSpinner"
-                android:layout_width="0dp" android:layout_weight="1"
-                android:layout_height="wrap_content" />
-            <Spinner android:id="@+id/countySpinner"
-                android:layout_width="0dp" android:layout_weight="1"
-                android:layout_height="wrap_content" />
-        </LinearLayout>
 
         <TextView android:id="@+id/speedLbl"
             android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -77,9 +98,6 @@
             <Button android:id="@+id/btnStop"
                 android:layout_width="0dp" android:layout_weight="1"
                 android:layout_height="wrap_content" android:text="STOP" />
-            <Button android:id="@+id/btnClear"
-                android:layout_width="0dp" android:layout_weight="1"
-                android:layout_height="wrap_content" android:text="Șterge desen" />
         </LinearLayout>
 
         <LinearLayout

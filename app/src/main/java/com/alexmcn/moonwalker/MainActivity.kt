@@ -9,21 +9,23 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import org.osmdroid.config.Configuration
-import org.osmdroid.events.MapListener
-import org.osmdroid.events.ScrollEvent
-import org.osmdroid.events.ZoomEvent
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
-import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.views.overlay.MapEventsOverlay
 
 class MainActivity : AppCompatActivity() {
 
+    // ── UI ──────────────────────────────────────────────────────────────────
     private lateinit var map: MapView
+    private lateinit var zoneLbl: TextView
+    private lateinit var countrySpinner: Spinner
+    private lateinit var level1Spinner: Spinner
+    private lateinit var level2Spinner: Spinner
     private lateinit var status: TextView
     private lateinit var speedBar: SeekBar
     private lateinit var rowBar: SeekBar
@@ -31,145 +33,199 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speedLbl: TextView
     private lateinit var rowLbl: TextView
     private lateinit var posLbl: TextView
-    private lateinit var countySpinner: Spinner
-    private lateinit var modeSpinner: Spinner
     private lateinit var controlPanel: LinearLayout
     private lateinit var btnToggle: Button
 
-    private val drawnPoints = ArrayList<GeoPoint>()
-    private var drawnPolyOverlay: Polygon? = null
-    private var curMarker: Marker? = null
+    // ── Stare zonă selectată ────────────────────────────────────────────────
+    private var selectedPoly: List<DoubleArray>? = null
+    private var selectedName: String = ""
+    private var zoneOutline: Polygon? = null
     private var routeSkipOverlay: Polyline? = null
     private var routeActiveOverlay: Polyline? = null
+    private var curMarker: Marker? = null
     private val ui = Handler(Looper.getMainLooper())
+
+    // ── Stare spinere (tracking ca să prevenim cascade onItemSelected) ──────
+    private var countryPos = -1   // -1 = neiniţializat
+    private var level1Pos  = -1
+    private var level2Pos  = -1
+    private var currentIso3 = ""
+    private var level1Data: List<RegionStore.Subdivision> = emptyList()
+    private var level2Data: List<RegionStore.Subdivision> = emptyList()
+
+    // ────────────────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Configuration.getInstance().userAgentValue = packageName
         setContentView(R.layout.activity_main)
 
-        map = findViewById(R.id.map)
+        map            = findViewById(R.id.map)
+        zoneLbl        = findViewById(R.id.zoneLbl)
+        countrySpinner = findViewById(R.id.countrySpinner)
+        level1Spinner  = findViewById(R.id.level1Spinner)
+        level2Spinner  = findViewById(R.id.level2Spinner)
+        status         = findViewById(R.id.status)
+        speedBar       = findViewById(R.id.speedBar)
+        rowBar         = findViewById(R.id.rowBar)
+        posBar         = findViewById(R.id.posBar)
+        speedLbl       = findViewById(R.id.speedLbl)
+        rowLbl         = findViewById(R.id.rowLbl)
+        posLbl         = findViewById(R.id.posLbl)
+        controlPanel   = findViewById(R.id.controlPanel)
+        btnToggle      = findViewById(R.id.btnToggle)
+
+        setupMap()
+        setupSpinners()
+        setupSliders()
+        setupButtons()
+        requestPerms()
+        pollStatus()
+    }
+
+    // ── Hartă ────────────────────────────────────────────────────────────────
+
+    private fun setupMap() {
         map.setTileSource(TileSourceFactory.MAPNIK)
         map.setMultiTouchControls(true)
         map.controller.setZoom(8.0)
         map.controller.setCenter(GeoPoint(47.15, 27.52))
 
-        status = findViewById(R.id.status)
-        speedBar = findViewById(R.id.speedBar)
-        rowBar = findViewById(R.id.rowBar)
-        posBar = findViewById(R.id.posBar)
-        speedLbl = findViewById(R.id.speedLbl)
-        rowLbl = findViewById(R.id.rowLbl)
-        posLbl = findViewById(R.id.posLbl)
-        countySpinner = findViewById(R.id.countySpinner)
-        modeSpinner = findViewById(R.id.modeSpinner)
-        controlPanel = findViewById(R.id.controlPanel)
-        btnToggle = findViewById(R.id.btnToggle)
-
-        modeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Vizibil pe hartă (bbox)", "Județ din listă", "Desenez pe hartă"))
-        modeSpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                refreshPreview()
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        })
-
-        countySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            Counties.names())
-        countySpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                // Selectarea unui județ comută automat la modul "Județ din listă"
-                if (modeSpinner.selectedItemPosition != 1) modeSpinner.setSelection(1)
-                showCountyOnMap(Counties.names()[pos])
-                refreshPreview()
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        })
-
-        speedBar.max = 1000; speedBar.progress = 120
-        rowBar.max = 300;    rowBar.progress = 130
-        posBar.max = 100;    posBar.progress = 0
-
-        speedBar.setOnSeekBarChangeListener(simpleSeek { speedLbl.text = "Viteză: ${speedBar.progress} km/h" })
-        rowBar.setOnSeekBarChangeListener(simpleSeek {
-            rowLbl.text = "Distanță rânduri: ${rowBar.progress} m"
-            refreshPreview()
-        })
-        posBar.setOnSeekBarChangeListener(simpleSeek {
-            posLbl.text = "Start din: ${posBar.progress}%"
-            refreshPreview()
-        })
-
-        speedLbl.text = "Viteză: 120 km/h"
-        rowLbl.text = "Distanță rânduri: 130 m"
-        posLbl.text = "Start din: 0%"
-
-        // Actualizează preview când harta se mișcă (mod bbox)
-        map.addMapListener(object : MapListener {
-            override fun onScroll(event: ScrollEvent?): Boolean {
-                if (modeSpinner.selectedItemPosition == 0) refreshPreview()
-                return false
-            }
-            override fun onZoom(event: ZoomEvent?): Boolean {
-                if (modeSpinner.selectedItemPosition == 0) refreshPreview()
-                return false
-            }
-        })
-
         val receiver = object : MapEventsReceiver {
             override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
                 if (p == null) return false
-                when (modeSpinner.selectedItemPosition) {
-                    1 -> selectCountyAtPoint(p.latitude, p.longitude)
-                    2 -> { drawnPoints.add(p); redrawDrawn() }
+                zoneLbl.text = "Se detectează zona…"
+                RegionStore.reverseGeocode(p.latitude, p.longitude, map.zoomLevelDouble) { zone ->
+                    runOnUiThread {
+                        if (zone?.poly != null) {
+                            setZone(zone.name, zone.poly)
+                        } else {
+                            zoneLbl.text = if (selectedName.isNotEmpty()) selectedName
+                                           else "Apasă pe hartă sau alege din liste"
+                            toast("Nu s-a putut detecta zona (necesită internet)")
+                        }
+                    }
                 }
                 return true
             }
-            override fun longPressHelper(p: GeoPoint?): Boolean { return false }
+            override fun longPressHelper(p: GeoPoint?) = false
         }
         map.overlays.add(MapEventsOverlay(receiver))
-
-        btnToggle.setOnClickListener {
-            val show = controlPanel.visibility == View.GONE
-            controlPanel.visibility = if (show) View.VISIBLE else View.GONE
-            btnToggle.text = if (show) "▼ ascunde" else "▲ arată controale"
-        }
-
-        findViewById<Button>(R.id.btnClear).setOnClickListener {
-            drawnPoints.clear()
-            drawnPolyOverlay?.let { map.overlays.remove(it) }
-            map.invalidate()
-        }
-        findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
-        findViewById<Button>(R.id.btnStop).setOnClickListener { stopService() }
-        findViewById<Button>(R.id.btnMock).setOnClickListener {
-            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
-        }
-        findViewById<Button>(R.id.btnUpdate).setOnClickListener {
-            UpdateManager.checkAndInstall(this)
-        }
-
-        requestPerms()
-        pollStatus()
     }
 
-    private fun currentZone(): Zone? {
-        return when (modeSpinner.selectedItemPosition) {
-            0 -> map.boundingBox.let { Zone.fromBbox(it.latSouth, it.latNorth, it.lonWest, it.lonEast) }
-            1 -> Counties.polygon(countySpinner.selectedItem as? String ?: return null)
-                    ?.let { Zone.fromPolygon(it) }
-            else -> null
-        }
+    // ── Spinere ierarhice ────────────────────────────────────────────────────
+
+    private fun setupSpinners() {
+        // Populează lista țărilor (placeholder la poziția 0)
+        val countryNames = listOf("— alege țara —") + RegionStore.EUROPE.map { it.name }
+        countrySpinner.adapter = spinnerAdapter(countryNames)
+        level1Spinner.adapter  = spinnerAdapter(listOf("— alege —"))
+        level2Spinner.adapter  = spinnerAdapter(listOf("—"))
+
+        countrySpinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (pos == countryPos) return
+                countryPos = pos
+                // reset cascadă
+                level1Pos = -1; level2Pos = -1
+                level1Data = emptyList(); level2Data = emptyList()
+                if (pos == 0) {
+                    level1Spinner.adapter = spinnerAdapter(listOf("— alege —"))
+                    level2Spinner.adapter = spinnerAdapter(listOf("—"))
+                    return
+                }
+                val country = RegionStore.EUROPE[pos - 1]
+                currentIso3 = country.iso3
+                level1Spinner.adapter = spinnerAdapter(listOf("Se încarcă…"))
+                level2Spinner.adapter = spinnerAdapter(listOf("—"))
+                RegionStore.loadLevel1(this@MainActivity, country.iso3) { subs ->
+                    runOnUiThread {
+                        if (subs.isNullOrEmpty()) {
+                            level1Spinner.adapter = spinnerAdapter(listOf("Fără date"))
+                        } else {
+                            level1Data = subs
+                            level1Spinner.adapter = spinnerAdapter(
+                                listOf("— alege regiunea —") + subs.map { it.name }
+                            )
+                        }
+                    }
+                }
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        })
+
+        level1Spinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (pos == level1Pos) return
+                level1Pos = pos
+                level2Pos = -1; level2Data = emptyList()
+                if (pos == 0 || level1Data.isEmpty()) {
+                    level2Spinner.adapter = spinnerAdapter(listOf("—"))
+                    return
+                }
+                val sub = level1Data[pos - 1]
+                setZone(sub.name, sub.poly)
+                level2Spinner.adapter = spinnerAdapter(listOf("Se descarcă…"))
+                RegionStore.loadLevel2(this@MainActivity, currentIso3, sub.name) { subs ->
+                    runOnUiThread {
+                        if (subs.isNullOrEmpty()) {
+                            level2Spinner.adapter = spinnerAdapter(listOf("— fără subdiviziuni —"))
+                        } else {
+                            level2Data = subs
+                            level2Spinner.adapter = spinnerAdapter(
+                                listOf("— ${sub.name} (nivel 1) —") + subs.map { it.name }
+                            )
+                        }
+                    }
+                }
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        })
+
+        level2Spinner.setOnItemSelectedListener(object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (pos == level2Pos) return
+                level2Pos = pos
+                if (pos == 0 || level2Data.isEmpty()) return  // placeholder → păstrăm zona nivel 1
+                val sub = level2Data[pos - 1]
+                setZone(sub.name, sub.poly)
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        })
     }
+
+    // ── Zona selectată ────────────────────────────────────────────────────────
+
+    private fun setZone(name: String, poly: List<DoubleArray>) {
+        selectedPoly = poly
+        selectedName = name
+        zoneLbl.text = name
+
+        zoneOutline?.let { map.overlays.remove(it) }
+        zoneOutline = Polygon().apply {
+            points = poly.map { GeoPoint(it[0], it[1]) }
+            fillPaint.color  = 0x3300FF88.toInt()
+            outlinePaint.color = 0xFFFF5252.toInt()
+            outlinePaint.strokeWidth = 3f
+        }
+        map.overlays.add(zoneOutline)
+
+        val cLat = poly.map { it[0] }.average()
+        val cLon = poly.map { it[1] }.average()
+        map.controller.animateTo(GeoPoint(cLat, cLon))
+        refreshPreview()
+    }
+
+    // ── Preview traseu ────────────────────────────────────────────────────────
 
     private fun refreshPreview() {
         routeSkipOverlay?.let { map.overlays.remove(it); routeSkipOverlay = null }
         routeActiveOverlay?.let { map.overlays.remove(it); routeActiveOverlay = null }
 
-        val zone = currentZone() ?: run { map.invalidate(); return }
-        val rowM = maxOf(10.0, rowBar.progress.toDouble())
-        val skipFrac = posBar.progress.toDouble() / 100.0
+        val poly = selectedPoly ?: run { map.invalidate(); return }
+        val zone    = Zone.fromPolygon(poly)
+        val rowM    = maxOf(10.0, rowBar.progress.toDouble())
+        val skipFrac = posBar.progress / 100.0
 
         if (skipFrac > 0.0) {
             val pts = RouteGenerator.computePreview(zone, rowM, 0.0, skipFrac)
@@ -194,86 +250,72 @@ class MainActivity : AppCompatActivity() {
             }
             map.overlays.add(routeActiveOverlay)
         }
-
         map.invalidate()
     }
 
-    private fun showCountyOnMap(name: String) {
-        val poly = Counties.polygon(name) ?: return
-        map.overlays.removeAll { it is Polygon && it != drawnPolyOverlay }
-        val p = Polygon().apply {
-            points = poly.map { GeoPoint(it[0], it[1]) }
-            fillPaint.color = 0x3300FF88.toInt()
-            outlinePaint.color = 0xFFFF5252.toInt()
-            outlinePaint.strokeWidth = 4f
+    // ── Slidere ───────────────────────────────────────────────────────────────
+
+    private fun setupSliders() {
+        speedBar.max = 1000; speedBar.progress = 120
+        rowBar.max   = 300;  rowBar.progress   = 130
+        posBar.max   = 100;  posBar.progress   = 0
+
+        speedBar.setOnSeekBarChangeListener(simpleSeek {
+            speedLbl.text = "Viteză: ${speedBar.progress} km/h"
+        })
+        rowBar.setOnSeekBarChangeListener(simpleSeek {
+            rowLbl.text = "Distanță rânduri: ${rowBar.progress} m"
+            refreshPreview()
+        })
+        posBar.setOnSeekBarChangeListener(simpleSeek {
+            posLbl.text = "Start din: ${posBar.progress}%"
+            refreshPreview()
+        })
+
+        speedLbl.text = "Viteză: 120 km/h"
+        rowLbl.text   = "Distanță rânduri: 130 m"
+        posLbl.text   = "Start din: 0%"
+    }
+
+    // ── Butoane ───────────────────────────────────────────────────────────────
+
+    private fun setupButtons() {
+        btnToggle.setOnClickListener {
+            val show = controlPanel.visibility == View.GONE
+            controlPanel.visibility = if (show) View.VISIBLE else View.GONE
+            btnToggle.text = if (show) "▼ ascunde" else "▲ arată controale"
         }
-        map.overlays.add(p)
-        val cLat = poly.map { it[0] }.average()
-        val cLon = poly.map { it[1] }.average()
-        map.controller.animateTo(GeoPoint(cLat, cLon))
-        map.invalidate()
-    }
-
-    private fun redrawDrawn() {
-        drawnPolyOverlay?.let { map.overlays.remove(it) }
-        if (drawnPoints.size >= 2) {
-            drawnPolyOverlay = Polygon().apply {
-                points = drawnPoints.toList()
-                fillPaint.color = 0x3300AAFF.toInt()
-                outlinePaint.color = 0xFF00AAFF.toInt()
-                outlinePaint.strokeWidth = 4f
-            }
-            map.overlays.add(drawnPolyOverlay)
+        findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
+        findViewById<Button>(R.id.btnStop).setOnClickListener {
+            startService(Intent(this, MockService::class.java).apply { action = MockService.ACTION_STOP })
         }
-        map.invalidate()
+        findViewById<Button>(R.id.btnMock).setOnClickListener {
+            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        }
+        findViewById<Button>(R.id.btnUpdate).setOnClickListener {
+            UpdateManager.checkAndInstall(this)
+        }
     }
 
-    private fun selectCountyAtPoint(lat: Double, lon: Double) {
-        val names = Counties.names()
-        val name = names.firstOrNull { n ->
-            val poly = Counties.polygon(n) ?: return@firstOrNull false
-            Zone.fromPolygon(poly).contains(lat, lon)
-        } ?: return
-        val idx = names.indexOf(name)
-        if (idx >= 0) countySpinner.setSelection(idx)
-    }
+    // ── Pornire serviciu ──────────────────────────────────────────────────────
 
     private fun startService() {
+        val poly = selectedPoly
+        if (poly == null) { toast("Selectează o zonă mai întâi"); return }
+
         val i = Intent(this, MockService::class.java)
-        i.putExtra(MockService.EXTRA_SPEED_KMH, speedBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_ROW_M, rowBar.progress.toDouble())
-        i.putExtra(MockService.EXTRA_STEP_M, 75.0)
-        i.putExtra(MockService.EXTRA_VERTICAL, false)
-        i.putExtra(MockService.EXTRA_LOOP, true)
-        i.putExtra(MockService.EXTRA_SKIP_FRACTION, posBar.progress.toDouble() / 100.0)
-
-        when (modeSpinner.selectedItemPosition) {
-            0 -> {
-                val bb = map.boundingBox
-                i.putExtra(MockService.EXTRA_LAT_MIN, bb.latSouth)
-                i.putExtra(MockService.EXTRA_LAT_MAX, bb.latNorth)
-                i.putExtra(MockService.EXTRA_LON_MIN, bb.lonWest)
-                i.putExtra(MockService.EXTRA_LON_MAX, bb.lonEast)
-            }
-            1 -> {
-                val poly = Counties.polygon(countySpinner.selectedItem as String)
-                if (poly != null) i.putExtra(MockService.EXTRA_POLY,
-                    poly.joinToString(";") { "${it[0]},${it[1]}" })
-            }
-            2 -> {
-                if (drawnPoints.size < 3) { toast("Desenează cel puțin 3 puncte"); return }
-                i.putExtra(MockService.EXTRA_POLY,
-                    drawnPoints.joinToString(";") { "${it.latitude},${it.longitude}" })
-            }
-        }
+        i.putExtra(MockService.EXTRA_SPEED_KMH,     speedBar.progress.toDouble())
+        i.putExtra(MockService.EXTRA_ROW_M,          rowBar.progress.toDouble())
+        i.putExtra(MockService.EXTRA_STEP_M,          75.0)
+        i.putExtra(MockService.EXTRA_VERTICAL,        false)
+        i.putExtra(MockService.EXTRA_LOOP,            true)
+        i.putExtra(MockService.EXTRA_SKIP_FRACTION,  posBar.progress / 100.0)
+        i.putExtra(MockService.EXTRA_POLY,           poly.joinToString(";") { "${it[0]},${it[1]}" })
         startForegroundService(i)
-        toast("Pornit")
+        toast("Pornit: $selectedName")
     }
 
-    private fun stopService() {
-        val i = Intent(this, MockService::class.java).apply { action = MockService.ACTION_STOP }
-        startService(i)
-    }
+    // ── Polling status & marker GPS ───────────────────────────────────────────
 
     private fun pollStatus() {
         ui.postDelayed(object : Runnable {
@@ -281,7 +323,6 @@ class MainActivity : AppCompatActivity() {
                 val running = MockService.running
                 val lat = MockService.curLat
                 val lon = MockService.curLon
-
                 status.text = if (running)
                     "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
                         MockService.statusText, lat, lon, MockService.pointsDone)
@@ -298,15 +339,14 @@ class MainActivity : AppCompatActivity() {
                     curMarker!!.position = GeoPoint(lat, lon)
                     map.invalidate()
                 } else if (!running && curMarker != null) {
-                    map.overlays.remove(curMarker)
-                    curMarker = null
-                    map.invalidate()
+                    map.overlays.remove(curMarker); curMarker = null; map.invalidate()
                 }
-
                 ui.postDelayed(this, 1000)
             }
         }, 500)
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun requestPerms() {
         val perms = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -330,13 +370,17 @@ class MainActivity : AppCompatActivity() {
         return android.graphics.drawable.BitmapDrawable(resources, bmp)
     }
 
+    private fun spinnerAdapter(items: List<String>) =
+        ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+
     private fun simpleSeek(onChange: () -> Unit) = object : SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) = onChange()
         override fun onStartTrackingTouch(s: SeekBar?) {}
         override fun onStopTrackingTouch(s: SeekBar?) {}
     }
+
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
     override fun onResume() { super.onResume(); map.onResume() }
-    override fun onPause() { super.onPause(); map.onPause() }
+    override fun onPause()  { super.onPause();  map.onPause()  }
 }
