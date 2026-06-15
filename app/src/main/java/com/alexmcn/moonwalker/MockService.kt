@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.tasks.Tasks
+import java.util.concurrent.TimeUnit
 import kotlin.math.*
 
 /**
@@ -128,8 +129,8 @@ class MockService : Service() {
         }
 
         thread = Thread {
-            // Dezactivăm sursele WiFi/cell din FLP — altfel FLP alternează între mock și locația reală WiFi
-            try { Tasks.await(fusedClient.setMockMode(true)) } catch (_: Exception) {}
+            // Dezactivăm sursele WiFi/cell din FLP — timeout 5s ca să nu blocăm thread-ul la infinit
+            try { Tasks.await(fusedClient.setMockMode(true), 5, TimeUnit.SECONDS) } catch (_: Exception) {}
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
