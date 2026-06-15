@@ -34,3 +34,18 @@ jobs:
         with:
           name: Moonwalker-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Get version name
+        id: ver
+        run: echo "name=1.0.$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.name }}
+          name: "Moonwalker v${{ steps.ver.outputs.name }}"
+          prerelease: false
+          make_latest: true
+          files: app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

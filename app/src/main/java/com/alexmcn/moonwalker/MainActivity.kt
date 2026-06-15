@@ -11,6 +11,7 @@ import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 import org.osmdroid.events.MapEventsReceiver
@@ -29,6 +30,7 @@ class MainActivity : AppCompatActivity() {
 
     private val drawnPoints = ArrayList<GeoPoint>()
     private var drawnPolyOverlay: Polygon? = null
+    private var curMarker: Marker? = null
     private val ui = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,7 +67,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         // sliders
-        speedBar.max = 280; speedBar.progress = 120
+        speedBar.max = 1000; speedBar.progress = 120
         rowBar.max = 300; rowBar.progress = 130
         speedBar.setOnSeekBarChangeListener(simpleSeek { speedLbl.text = "Viteză: ${speedBar.progress} km/h" })
         rowBar.setOnSeekBarChangeListener(simpleSeek { rowLbl.text = "Distanță rânduri: ${rowBar.progress} m" })
@@ -91,6 +93,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnStop).setOnClickListener { stopService() }
         findViewById<Button>(R.id.btnMock).setOnClickListener {
             startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        }
+        findViewById<Button>(R.id.btnUpdate).setOnClickListener {
+            UpdateManager.checkAndInstall(this)
         }
 
         requestPerms()
@@ -166,10 +171,29 @@ class MainActivity : AppCompatActivity() {
     private fun pollStatus() {
         ui.postDelayed(object : Runnable {
             override fun run() {
-                status.text = if (MockService.running)
+                val running = MockService.running
+                val lat = MockService.curLat
+                val lon = MockService.curLon
+
+                status.text = if (running)
                     "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
-                        MockService.statusText, MockService.curLat, MockService.curLon, MockService.pointsDone)
+                        MockService.statusText, lat, lon, MockService.pointsDone)
                 else "○ ${MockService.statusText}"
+
+                if (running && lat != 0.0) {
+                    if (curMarker == null) {
+                        curMarker = Marker(map).apply {
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            map.overlays.add(this)
+                        }
+                    }
+                    curMarker!!.position = GeoPoint(lat, lon)
+                } else if (!running && curMarker != null) {
+                    map.overlays.remove(curMarker)
+                    curMarker = null
+                }
+                map.invalidate()
+
                 ui.postDelayed(this, 1000)
             }
         }, 500)

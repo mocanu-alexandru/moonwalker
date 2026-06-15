@@ -58,9 +58,20 @@
             android:layout_height="wrap_content" android:text="Șterge desen" />
     </LinearLayout>
 
-    <Button android:id="@+id/btnMock"
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:text="Deschide Developer Options (setează Mock app)"
-        android:textSize="11sp" />
+    <LinearLayout
+        android:orientation="horizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+        <Button android:id="@+id/btnMock"
+            android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Developer Options"
+            android:textSize="11sp" />
+        <Button android:id="@+id/btnUpdate"
+            android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Verifică update"
+            android:textSize="11sp" />
+    </LinearLayout>
 
 </LinearLayout>

@@ -3,6 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val gitCommitCount = try {
+    Runtime.getRuntime().exec("git rev-list --count HEAD")
+        .inputStream.bufferedReader().readText().trim().toInt()
+} catch (_: Exception) { 1 }
+
 android {
     namespace = "com.alexmcn.moonwalker"
     compileSdk = 34
@@ -11,8 +16,8 @@ android {
         applicationId = "com.alexmcn.moonwalker"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = gitCommitCount
+        versionName = "1.0.$gitCommitCount"
     }
 
     buildTypes {
