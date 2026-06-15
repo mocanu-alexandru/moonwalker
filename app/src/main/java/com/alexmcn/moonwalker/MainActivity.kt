@@ -451,10 +451,11 @@ class MainActivity : AppCompatActivity() {
                 val running = MockService.running
                 val lat = MockService.curLat
                 val lon = MockService.curLon
-                status.text = if (running)
-                    "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
-                        MockService.statusText, lat, lon, MockService.pointsDone)
-                else "○ ${MockService.statusText}"
+                status.text = if (running) {
+                    val flp = if (MockService.flpActive) "FLP ✓" else "FLP ✗ (doar GPS intern)"
+                    "● %s  |  %s\nlat %.5f  lon %.5f\npuncte: %d".format(
+                        MockService.statusText, flp, lat, lon, MockService.pointsDone)
+                } else "○ ${MockService.statusText}"
 
                 if (running && lat != 0.0) {
                     if (curMarker == null) {

@@ -44,6 +44,7 @@ class MockService : Service() {
         @Volatile var progress = 0.0
         @Volatile var pointsDone = 0
         @Volatile var statusText = "oprit"
+        @Volatile var flpActive = false   // true dacă setMockMode(true) a reușit
     }
 
     private lateinit var lm: LocationManager
@@ -130,7 +131,13 @@ class MockService : Service() {
 
         thread = Thread {
             // Dezactivăm sursele WiFi/cell din FLP — timeout 5s ca să nu blocăm thread-ul la infinit
-            try { Tasks.await(fusedClient.setMockMode(true), 5, TimeUnit.SECONDS) } catch (_: Exception) {}
+            flpActive = try {
+                Tasks.await(fusedClient.setMockMode(true), 5, TimeUnit.SECONDS)
+                true
+            } catch (e: Exception) {
+                statusText = "⚠ FLP inactiv: ${e.javaClass.simpleName}"
+                false
+            }
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
@@ -256,6 +263,7 @@ class MockService : Service() {
     private fun stopEverything() {
         stopFlag = true
         running = false
+        flpActive = false
         try { fusedClient.setMockMode(false) } catch (_: Exception) {}
         for (p in providers) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
