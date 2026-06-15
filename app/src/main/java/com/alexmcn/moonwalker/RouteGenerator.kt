@@ -202,6 +202,45 @@ class RouteGenerator(
             return hits
         }
 
+        /**
+         * Estimează durata în secunde pentru parcurgerea zonei.
+         * Folosește computePreview() (cu polygon clipping) pentru a obține lungimile reale
+         * ale rândurilor/coloanelor, apoi le scalează la numărul total de linii din zonă.
+         * fromFraction: de unde pornește (0.0 = tot, 0.5 = jumătate rămasă etc.)
+         */
+        fun estimateDuration(
+            zone: Zone, rowM: Double, stepM: Double, hz: Int,
+            vertical: Boolean, fromFraction: Double = 0.0
+        ): Long {
+            val preview = computePreview(zone, rowM, fromFraction, 1.0, 200, vertical)
+            if (preview.size < 2) return 0L
+
+            // Lungimea totală a rândurilor eșantionate
+            var sampledLen = 0.0
+            var i = 0
+            while (i + 1 < preview.size) {
+                sampledLen += haversine(preview[i], preview[i + 1])
+                i += 2
+            }
+            val nSampled = preview.size / 2
+            if (nSampled == 0) return 0L
+
+            // Factor de scalare: câte linii totale există vs câte am eșantionat
+            val M_LAT = 111_320.0
+            val latCenter = (zone.latMin + zone.latMax) / 2.0
+            val dLine = if (!vertical) rowM / M_LAT
+                        else rowM / (M_LAT * cos(Math.toRadians(latCenter)))
+            val nTotal = if (!vertical) max(1, ((zone.latMax - zone.latMin) / dLine).toInt() + 1)
+                         else            max(1, ((zone.lonMax - zone.lonMin) / dLine).toInt() + 1)
+            val fraction = 1.0 - fromFraction
+            val nEffective = (nTotal * fraction).toInt().coerceAtLeast(1)
+            val scale = nEffective.toDouble() / nSampled
+
+            val totalLenM = sampledLen * scale
+            val waypoints = (totalLenM / stepM).toLong()
+            return if (hz > 0) waypoints / hz else waypoints
+        }
+
         fun haversine(a: DoubleArray, b: DoubleArray): Double {
             val R = 6_371_000.0
             val la1 = Math.toRadians(a[0]); val la2 = Math.toRadians(b[0])

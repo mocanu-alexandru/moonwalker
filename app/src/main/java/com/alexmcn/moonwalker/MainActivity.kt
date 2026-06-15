@@ -270,12 +270,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Zona selectată ────────────────────────────────────────────────────────
+    // ── Zona selectată + estimare timp ───────────────────────────────────────
 
     private fun setZone(name: String, poly: List<DoubleArray>) {
         selectedPoly = poly
         selectedName = name
-        zoneLbl.text = name
+        zoneLbl.text = name   // provizoriu; estimateAndShow() completează
 
         zoneOutline?.let { map.overlays.remove(it) }
         zoneOutline = Polygon().apply {
@@ -290,6 +290,26 @@ class MainActivity : AppCompatActivity() {
         val cLon = poly.map { it[1] }.average()
         map.controller.animateTo(GeoPoint(cLat, cLon))
         refreshPreview()
+        estimateAndShow()
+    }
+
+    private fun estimateAndShow() {
+        val poly = selectedPoly ?: return
+        val zone     = Zone.fromPolygon(poly)
+        val rowM     = maxOf(10.0, rowBar.progress.toDouble())
+        val hz       = hzBar.progress + 1
+        val skipFrac = posBar.progress / 100.0
+        val sec      = RouteGenerator.estimateDuration(zone, rowM, 75.0, hz, isVertical, skipFrac)
+        val timeStr  = fmtDuration(sec)
+        val suffix   = if (skipFrac > 0.0) "  •  ~$timeStr restant" else "  •  ~$timeStr"
+        zoneLbl.text = "$selectedName$suffix"
+    }
+
+    private fun fmtDuration(sec: Long): String = when {
+        sec <= 0    -> "< 1s"
+        sec < 60    -> "${sec}s"
+        sec < 3600  -> "${sec / 60}min ${sec % 60}s"
+        else        -> "${sec / 3600}h ${(sec % 3600) / 60}min"
     }
 
     // ── Preview traseu ────────────────────────────────────────────────────────
@@ -337,15 +357,17 @@ class MainActivity : AppCompatActivity() {
         rowBar.max = 300; rowBar.progress = 130
         posBar.max = 100; posBar.progress = 0
 
-        hzBar.setOnSeekBarChangeListener(simpleSeek { updateHzLabel() })
+        hzBar.setOnSeekBarChangeListener(simpleSeek { updateHzLabel(); estimateAndShow() })
         rowBar.setOnSeekBarChangeListener(simpleSeek {
             rowLbl.text = "Distanță rânduri: ${rowBar.progress} m"
-            updateHzLabel()   // viteza depinde și de rowSpacing (indirect prin stepM)
+            updateHzLabel()
             refreshPreview()
+            estimateAndShow()
         })
         posBar.setOnSeekBarChangeListener(simpleSeek {
             posLbl.text = "Start din: ${posBar.progress}%"
             refreshPreview()
+            estimateAndShow()
         })
 
         updateHzLabel()
@@ -371,6 +393,7 @@ class MainActivity : AppCompatActivity() {
         btnDirection.setOnCheckedChangeListener { _, checked ->
             isVertical = checked
             refreshPreview()
+            estimateAndShow()
         }
         findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
         findViewById<Button>(R.id.btnStop).setOnClickListener {
