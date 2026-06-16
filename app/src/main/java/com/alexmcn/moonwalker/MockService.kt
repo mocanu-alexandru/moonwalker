@@ -154,7 +154,10 @@ class MockService : Service() {
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
             val tickMs = 1000L / tickHz        // ms între injecții
-            val metersPerTick = speedKmh * 1000.0 / 3600.0  // = stepM (1 waypoint per tick)
+            // Mutăm stepM metri per tick, dormind 1/tickHz sec → viteza = stepM*tickHz m/s =
+            // speedKmh/3.6, exact viteza configurată. (Bug vechi: era speedKmh/3.6 = stepM*tickHz,
+            // adică tickHz× prea repede — invizibil la 1Hz, dar 10× la 10Hz → 360 km/h în loc de 36.)
+            val metersPerTick = stepM
             pointsDone = 0
 
             // Tranziție lină de la locația reală la primul waypoint din traseu
