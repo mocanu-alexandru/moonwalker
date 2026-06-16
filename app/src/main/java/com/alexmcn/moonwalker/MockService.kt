@@ -130,10 +130,10 @@ class MockService : Service() {
         // care DEBLOCHEAZĂ astfel de aplicații): NETWORK + GPS + FUSED_PROVIDER (Android 12+).
         // FUSED_PROVIDER (API 31+) e providerul canonic pe care îl citesc FLP, Maps și path-ul de
         // unlock al Bump — îl rateam complet, de-aia Bump nu înregistra mișcarea.
-        activeProviders = mutableListOf(
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.GPS_PROVIDER
-        )
+        // GPS + FUSED (fără NETWORK): Lockito mockează "gps only" + fused. NETWORK_PROVIDER
+        // a cauzat probleme repetate (două locații, viteză trasă spre 0 în fuziune). FUSED_PROVIDER
+        // (API31+) e canalul care a deblocat livrarea locației către Bump (contorul a pornit).
+        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
         if (Build.VERSION.SDK_INT >= 31) activeProviders.add(LocationManager.FUSED_PROVIDER)
         try {
             for (p in activeProviders) addMockProvider(p)
