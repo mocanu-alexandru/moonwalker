@@ -434,6 +434,35 @@ class MainActivity : AppCompatActivity() {
             UpdateManager.checkAndInstall(this)
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
+        findViewById<Button>(R.id.btnOptim).setOnClickListener { applyOptimalCoverage() }
+    }
+
+    /**
+     * Setări optime pentru acoperire 100% în Bump, cât mai rapid.
+     * Bump = hexagoane H3 rezoluție 9 (~302m lățime între centre) și eșantionează locația la 1Hz.
+     *   • rowM = 260m (< 302, margine ca să nu sară rânduri de hexagoane)
+     *   • viteză = 100 m/s = 360 km/h (la 1Hz → ~3 eșantioane/hexagon de-a lungul rândului)
+     *     din stepM=50 × Hz=2 = 100 m/s
+     *   • orientare: rânduri pe latura LUNGĂ a zonei (mai puține întoarceri)
+     */
+    private fun applyOptimalCoverage() {
+        rowBar.progress = 260      // rowM = 260 m
+        hzBar.progress  = 1        // Hz = progress + 1 = 2
+        stepBar.progress = 49      // stepM = progress + 1 = 50 m  → 50 × 2 = 100 m/s = 360 km/h
+
+        // Orientează rândurile pe latura lungă: dacă zona e mai înaltă N-S decât lată E-V → vertical
+        selectedPoly?.let { poly ->
+            val cLat   = poly.map { it[0] }.average()
+            val latSpan = (poly.maxOf { it[0] } - poly.minOf { it[0] }) * 111_320.0
+            val lonSpan = (poly.maxOf { it[1] } - poly.minOf { it[1] }) *
+                          111_320.0 * Math.cos(Math.toRadians(cLat))
+            val wantVertical = latSpan > lonSpan
+            if (btnDirection.isChecked != wantVertical) btnDirection.isChecked = wantVertical
+        }
+
+        refreshPreview()
+        estimateAndShow()
+        toast("Optim Bump: rânduri 260m • 50m×2Hz = 360 km/h • H3 rez9 (~300m)")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */

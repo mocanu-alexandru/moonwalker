@@ -134,6 +134,12 @@
         <SeekBar android:id="@+id/posBar"
             android:layout_width="match_parent" android:layout_height="wrap_content" />
 
+        <Button android:id="@+id/btnOptim"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="⚡ Setări optime — acoperire 100% (Bump)"
+            android:textSize="12sp"
+            android:paddingTop="2dp" android:paddingBottom="2dp" />
+
         <LinearLayout
             android:orientation="horizontal"
             android:layout_width="match_parent"
