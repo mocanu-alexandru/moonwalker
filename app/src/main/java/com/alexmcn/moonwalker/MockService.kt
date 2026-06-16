@@ -197,32 +197,15 @@ class MockService : Service() {
      * Returnează `to` ca să devină `prev` în bucla principală.
      */
     private fun doTransition(from: DoubleArray, to: DoubleArray, tickMs: Long, speedKmh: Double): DoubleArray {
+        // Nu injectăm niciodată locația reală (acasă) — FLP ar învăța-o ca referință
+        // și ar continua să tragă spre ea. Pornim direct la țintă sau interpolăm de acolo.
         val distM = RouteGenerator.haversine(from, to)
-        if (distM < 500.0) {
-            // Prea aproape — injectăm direct locația reală 2 ticks, fără interpolare
-            repeat(2) {
-                if (!stopFlag) {
-                    pushLocation(from[0], from[1], 0.0)
-                    curLat = from[0]; curLon = from[1]
-                    try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
-                }
-            }
-            return to
-        }
+        if (distM < 500.0) return to
         val nSteps = when {
             distM < 5_000.0  -> 5
             distM < 50_000.0 -> 10
             else             -> 15
         }
-        // 2 ticks la locația reală (FLP calibrare)
-        repeat(2) {
-            if (!stopFlag) {
-                pushLocation(from[0], from[1], 0.0)
-                curLat = from[0]; curLon = from[1]
-                try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
-            }
-        }
-        // nSteps ticks de interpolare liniară spre primul waypoint
         for (s in 1..nSteps) {
             if (stopFlag) break
             val t = s.toDouble() / nSteps
@@ -248,7 +231,7 @@ class MockService : Service() {
             try {
                 val loc = Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
-                    accuracy = 3.0f
+                    accuracy = 1.0f
                     time = now; elapsedRealtimeNanos = elapsed
                     speed = (speedKmh / 3.6).toFloat()
                     bearing = brg
