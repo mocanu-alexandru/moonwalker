@@ -293,6 +293,22 @@ class MockService : Service() {
         super.onDestroy()
     }
 
+    // Dacă serviciul e omorât când userul dă swipe din recents, se repornește după 1s.
+    // Nu se declanșează când userul apasă STOP explicit (stopSelf() nu cheamă onTaskRemoved).
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (running) {
+            val restart = PendingIntent.getService(
+                this, 1,
+                Intent(applicationContext, MockService::class.java),
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+            (getSystemService(ALARM_SERVICE) as android.app.AlarmManager)
+                .set(android.app.AlarmManager.ELAPSED_REALTIME,
+                    SystemClock.elapsedRealtime() + 1000L, restart)
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     // ---- notificare foreground ----
     private fun createChannel() {
         val ch = NotificationChannel(CH_ID, "Moonwalker", NotificationManager.IMPORTANCE_LOW)
