@@ -173,12 +173,17 @@ class MockService : Service() {
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
-            val tickMs = 1000L / tickHz        // ms între injecții
-            // Mutăm stepM metri per tick, dormind 1/tickHz sec → viteza = stepM*tickHz m/s =
-            // speedKmh/3.6, exact viteza configurată. (Bug vechi: era speedKmh/3.6 = stepM*tickHz,
-            // adică tickHz× prea repede — invizibil la 1Hz, dar 10× la 10Hz → 360 km/h în loc de 36.)
-            val metersPerTick = stepM
+            // Decuplăm netezimea de viteză: injectăm la o rată internă fluidă (≥12Hz) indiferent
+            // de Hz-ul ales, mutând proporțional mai puțini metri per injecție. Viteza rămâne
+            // exactă (metersPerTick * injectHz = speedMps), dar mișcarea nu mai e sacadată.
+            val speedMps = stepM * tickHz                 // = speedKmh/3.6
+            // Rată internă ≥12Hz ȘI multiplu al tickHz, ca sub-pașii per waypoint să fie întregi
+            // (fără eroare de rotunjire în viteză) dar mișcarea să fie fluidă.
+            val injectHz = tickHz * max(1, ceil(12.0 / tickHz).toInt())
+            val tickMs = 1000L / injectHz
+            val metersPerTick = speedMps / injectHz       // distanță per injecție la rata fluidă
             pointsDone = 0
+            var lastUiMs = 0L
 
             // Tranziție lină de la ultima poziție (sau locația reală la prima rulare) spre traseu
             val firstPt = gen.next()
@@ -208,9 +213,15 @@ class MockService : Service() {
                     curLat = lat; curLon = lon
                     progress = gen.progress()
                     pointsDone++
-                    val ch = if (flpActive) "GPS+FUSED" else "GPS (fused eșuat)"
-                    statusText = "rulează • %.1f%% • %s".format(progress * 100, ch)
-                    updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, ch))
+                    // Actualizăm UI/notificarea ~3×/sec, nu la fiecare injecție (rebuild-ul
+                    // notificării la 12+Hz cauza jank și încetinea bucla).
+                    val nowMs = SystemClock.elapsedRealtime()
+                    if (nowMs - lastUiMs >= 333) {
+                        lastUiMs = nowMs
+                        val ch = if (flpActive) "GPS+FUSED" else "GPS (fused eșuat)"
+                        statusText = "rulează • %.1f%% • %s".format(progress * 100, ch)
+                        updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, ch))
+                    }
                     try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
                 }
                 prev = target
