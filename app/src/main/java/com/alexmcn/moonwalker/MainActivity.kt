@@ -438,17 +438,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Setări optime pentru acoperire 100% în Bump, cât mai rapid.
-     * Bump = hexagoane H3 rezoluție 9 (~302m lățime între centre) și eșantionează locația la 1Hz.
-     *   • rowM = 260m (< 302, margine ca să nu sară rânduri de hexagoane)
-     *   • viteză = 100 m/s = 360 km/h (la 1Hz → ~3 eșantioane/hexagon de-a lungul rândului)
-     *     din stepM=50 × Hz=2 = 100 m/s
+     * Setări optime pentru acoperire 100% în Bump, cât mai rapid și FĂRĂ goluri.
+     * Bump = hexagoane H3 rez9 (latură ~174m, ~302m între centre); eșantionează locația la 1Hz.
+     * Cheia: rowM mai mic → fiecare hexagon e tăiat aproape de centru (coardă lată ~217m) →
+     * permite viteză mare fără să sară hexagoane. rowM mare ar tăia unele hexagoane pe la vârf
+     * (coardă ~45m) → goluri la viteză mare.
+     *   • rowM = 210m  → coardă minimă ~217m
+     *   • viteză = 140 m/s = 504 km/h (inter-eșantion 140m < 217m coardă → margine 1.55×, fără goluri)
+     *     din stepM=35 × Hz=4 = 140 m/s
      *   • orientare: rânduri pe latura LUNGĂ a zonei (mai puține întoarceri)
      */
     private fun applyOptimalCoverage() {
-        rowBar.progress = 260      // rowM = 260 m
-        hzBar.progress  = 1        // Hz = progress + 1 = 2
-        stepBar.progress = 49      // stepM = progress + 1 = 50 m  → 50 × 2 = 100 m/s = 360 km/h
+        rowBar.progress = 210      // rowM = 210 m
+        hzBar.progress  = 3        // Hz = progress + 1 = 4
+        stepBar.progress = 34      // stepM = progress + 1 = 35 m  → 35 × 4 = 140 m/s = 504 km/h
 
         // Orientează rândurile pe latura lungă: dacă zona e mai înaltă N-S decât lată E-V → vertical
         selectedPoly?.let { poly ->
@@ -462,7 +465,7 @@ class MainActivity : AppCompatActivity() {
 
         refreshPreview()
         estimateAndShow()
-        toast("Optim Bump: rânduri 260m • 50m×2Hz = 360 km/h • H3 rez9 (~300m)")
+        toast("Optim Bump: rânduri 210m • 35m×4Hz = 504 km/h • fără goluri (H3 rez9)")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */
