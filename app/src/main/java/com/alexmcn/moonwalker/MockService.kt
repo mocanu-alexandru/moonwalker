@@ -8,6 +8,8 @@ import android.location.LocationManager
 import android.location.provider.ProviderProperties
 import android.os.*
 import androidx.core.app.NotificationCompat
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
 import kotlin.math.*
 
 /**
@@ -44,6 +46,7 @@ class MockService : Service() {
     }
 
     private lateinit var lm: LocationManager
+    private lateinit var fusedClient: FusedLocationProviderClient
     private var wakeLock: PowerManager.WakeLock? = null
     private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
@@ -56,6 +59,7 @@ class MockService : Service() {
     override fun onCreate() {
         super.onCreate()
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        fusedClient = LocationServices.getFusedLocationProviderClient(this)
         createChannel()
     }
 
@@ -142,7 +146,14 @@ class MockService : Service() {
             statusText = "EROARE mock provider: ${e.message}"
             stopEverything(); return
         }
-        flpActive = true  // LocationManager mock activ
+        // setMockMode(true) înlocuiește complet outputul FLP (inclusiv NLP intern cu WiFi real).
+        // Fără asta, FLP amestecă mock GPS cu locația WiFi reală (acasă) → două locații vizibile.
+        // onStartCommand rulează pe main thread, deci apelăm direct.
+        try {
+            fusedClient.setMockMode(true)
+                .addOnSuccessListener { flpActive = true }
+                .addOnFailureListener { flpActive = false }
+        } catch (_: SecurityException) { flpActive = false }
 
         thread = Thread {
 
@@ -243,6 +254,21 @@ class MockService : Service() {
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
         }
+        // Injectăm și direct în FLP — suprascrie NLP-ul intern (WiFi real) care raporta acasă
+        if (flpActive) {
+            try {
+                fusedClient.setMockLocation(Location("fused").apply {
+                    latitude = lat; longitude = lon; altitude = 100.0
+                    accuracy = 1.0f
+                    time = now; elapsedRealtimeNanos = elapsed
+                    speed = (speedKmh / 3.6).toFloat()
+                    bearing = brg
+                    bearingAccuracyDegrees = 0.5f
+                    speedAccuracyMetersPerSecond = 0.05f
+                    verticalAccuracyMeters = 0.2f
+                })
+            } catch (_: Exception) {}
+        }
     }
 
     private fun calcBearing(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Float {
@@ -260,6 +286,9 @@ class MockService : Service() {
         flpActive = false
         prevLat = Double.NaN; prevLon = Double.NaN
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
+        Handler(Looper.getMainLooper()).post {
+            try { fusedClient.setMockMode(false) } catch (_: Exception) {}
+        }
         for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
