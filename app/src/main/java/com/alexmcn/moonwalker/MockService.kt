@@ -74,6 +74,13 @@ class MockService : Service() {
         val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
+        // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
+        // UI-ul trimite mereu EXTRA_POLY; lipsa lui = restart de sistem, nu start real.
+        if (polyStr.isNullOrBlank()) {
+            if (!running) stopEverything()
+            return if (running) START_STICKY else START_NOT_STICKY
+        }
+
         val zone: Zone = if (polyStr != null && polyStr.isNotBlank()) {
             val pts = polyStr.split(";").mapNotNull {
                 val a = it.split(","); if (a.size == 2)
@@ -106,6 +113,11 @@ class MockService : Service() {
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null
     ) {
+        // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
+        // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
+        // vede stopFlag resetat la false și continuă cu setările vechi în paralel.
+        stopPreviousRun()
+
         stopFlag = false
         running = true
         val speedKmh = stepM * tickHz * 3.6
@@ -195,7 +207,9 @@ class MockService : Service() {
                 }
                 prev = target
             }
-            stopEverything()
+            // Oprire completă DOAR dacă am ieșit natural (traseu terminat), nu dacă am fost
+            // înlocuiți de un restart (care a setat stopFlag=true și face propriul teardown).
+            if (!stopFlag) stopEverything()
         }
         thread?.start()
     }
@@ -264,13 +278,15 @@ class MockService : Service() {
         return ((Math.toDegrees(atan2(y, x)) + 360) % 360).toFloat()
     }
 
-    private fun stopEverything() {
-        stopFlag = true
-        running = false
-        flpActive = false
-        prevLat = Double.NaN; prevLon = Double.NaN
+    /**
+     * Eliberează resursele de mock (wakelock, test provider gps, opțional FLP mock mode).
+     * `stopMockMode=false` la repornire: păstrăm FLP în mock mode ca să nu facem
+     * off→on inutil (race). `stopMockMode=true` la oprire reală.
+     */
+    private fun teardownMock(stopMockMode: Boolean) {
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
-        Handler(Looper.getMainLooper()).post {
+        if (stopMockMode) {
+            flpActive = false
             try { fusedClient.setMockMode(false) } catch (_: Exception) {}
         }
         for (p in activeProviders) {
@@ -278,6 +294,22 @@ class MockService : Service() {
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
         }
         activeProviders.clear()
+    }
+
+    /** Oprește complet thread-ul de injecție anterior (sincron) înainte de o repornire. */
+    private fun stopPreviousRun() {
+        stopFlag = true
+        thread?.interrupt()
+        try { thread?.join(3000) } catch (_: InterruptedException) {}
+        thread = null
+        teardownMock(stopMockMode = false)
+    }
+
+    private fun stopEverything() {
+        stopFlag = true
+        running = false
+        prevLat = Double.NaN; prevLon = Double.NaN
+        teardownMock(stopMockMode = true)
         if (statusText.startsWith("rulează")) statusText = "oprit"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -285,7 +317,7 @@ class MockService : Service() {
 
     override fun onDestroy() {
         stopFlag = true
-        for (p in activeProviders) { try { lm.removeTestProvider(p) } catch (_: Exception) {} }
+        teardownMock(stopMockMode = true)
         super.onDestroy()
     }
 
