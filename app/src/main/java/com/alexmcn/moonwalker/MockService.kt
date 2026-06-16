@@ -126,14 +126,18 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // EXACT ca Lockito (decompilat din lockito-3-8-2): "gps only" = DOAR GPS prin
-        // LocationManager (n5.r) + FLP setMockMode/setMockLocation (n5.g). FĂRĂ network,
-        // FĂRĂ FUSED_PROVIDER la nivel de LocationManager — ăla dubla alimentarea canalului
-        // fused (LM-fused + FLP), probabil cauza vitezei greșite în Bump.
-        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
-        try {
-            for (p in activeProviders) addMockProvider(p)
-        } catch (e: SecurityException) {
+        // EXACT ca Lockito (decompilat n5.r.g): mockăm TOȚI providerii din getAllProviders()
+        // MINUS "passive" (gps + network + fused + orice). Eticheta lui "gps only" e înșelătoare.
+        // n5.r.d() înregistrează fiecare cu try/catch per-provider, sărind peste cele ce eșuează.
+        activeProviders = lm.allProviders
+            .filter { it != LocationManager.PASSIVE_PROVIDER }
+            .toMutableList()
+        var anyOk = false
+        for (p in activeProviders.toList()) {
+            try { addMockProvider(p); anyOk = true }
+            catch (_: Exception) { activeProviders.remove(p) }
+        }
+        if (!anyOk) {
             statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
             stopEverything(); return
         }
