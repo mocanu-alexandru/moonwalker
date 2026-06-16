@@ -106,13 +106,21 @@ class MockService : Service() {
         running = true
         val speedKmh = stepM * tickHz * 3.6
 
-        // Construim lista de provideri: GPS + NETWORK (obligatorii) + "fused" dacă e disponibil
-        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        // Mockăm DOAR GPS_PROVIDER — lăsăm NETWORK_PROVIDER real (WiFi/cell).
+        // Dacă mockăm ambii, FLP primește toți furnizorii ca test → marchează output isMock=true.
+        // Cu un singur input mock (GPS) și unul real (WiFi), FLP nu propagă flag-ul.
+        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
         try {
             for (p in activeProviders) {
                 lm.addTestProvider(
-                    p, false, false, false, false,
-                    true, true, true,
+                    p,
+                    /*requiresNetwork=*/   false,
+                    /*requiresSatellite=*/ p == LocationManager.GPS_PROVIDER,
+                    /*requiresCell=*/      false,
+                    /*hasMonetaryCost=*/   false,
+                    /*supportsAltitude=*/  true,
+                    /*supportsSpeed=*/     true,
+                    /*supportsBearing=*/   true,
                     ProviderProperties.POWER_USAGE_LOW,
                     ProviderProperties.ACCURACY_FINE
                 )
@@ -252,6 +260,7 @@ class MockService : Service() {
                     bearingAccuracyDegrees = 0.5f
                     speedAccuracyMetersPerSecond = 0.05f
                     verticalAccuracyMeters = 0.2f
+                    extras = Bundle().apply { putInt("satellites", 8) }
                 }
                 lm.setTestProviderLocation(p, loc)
             } catch (_: Exception) {}
