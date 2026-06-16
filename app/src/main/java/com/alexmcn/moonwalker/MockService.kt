@@ -126,15 +126,11 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // Mockăm TOATE provider-ele LocationManager ca FakeTraveler/warren-bank (apps open-source
-        // care DEBLOCHEAZĂ astfel de aplicații): NETWORK + GPS + FUSED_PROVIDER (Android 12+).
-        // FUSED_PROVIDER (API 31+) e providerul canonic pe care îl citesc FLP, Maps și path-ul de
-        // unlock al Bump — îl rateam complet, de-aia Bump nu înregistra mișcarea.
-        // GPS + FUSED (fără NETWORK): Lockito mockează "gps only" + fused. NETWORK_PROVIDER
-        // a cauzat probleme repetate (două locații, viteză trasă spre 0 în fuziune). FUSED_PROVIDER
-        // (API31+) e canalul care a deblocat livrarea locației către Bump (contorul a pornit).
+        // EXACT ca Lockito (decompilat din lockito-3-8-2): "gps only" = DOAR GPS prin
+        // LocationManager (n5.r) + FLP setMockMode/setMockLocation (n5.g). FĂRĂ network,
+        // FĂRĂ FUSED_PROVIDER la nivel de LocationManager — ăla dubla alimentarea canalului
+        // fused (LM-fused + FLP), probabil cauza vitezei greșite în Bump.
         activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
-        if (Build.VERSION.SDK_INT >= 31) activeProviders.add(LocationManager.FUSED_PROVIDER)
         try {
             for (p in activeProviders) addMockProvider(p)
         } catch (e: SecurityException) {
@@ -247,36 +243,25 @@ class MockService : Service() {
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
-        val brg = if (!prevLat.isNaN()) calcBearing(prevLat, prevLon, lat, lon) else 0f
         prevLat = lat; prevLon = lon
-        // Câmpuri ca în referința FakeTraveler (accuracy 3m realist, fără extras "satellites").
+        // Câmpuri EXACT ca Lockito (decompilat s5.b.a): doar time, lat/lon, altitude, speed,
+        // accuracy, elapsedRealtimeNanos. FĂRĂ bearing, FĂRĂ sub-acurateți, FĂRĂ extras —
+        // câmpurile în plus probabil derutau calculul de viteză al Bump.
         fun fill(loc: Location) = loc.apply {
+            time = now
             latitude = lat; longitude = lon; altitude = 3.0
-            accuracy = 3.0f
-            time = now; elapsedRealtimeNanos = elapsed
             speed = (speedKmh / 3.6).toFloat()
-            bearing = brg
-            bearingAccuracyDegrees = 0.1f
-            speedAccuracyMetersPerSecond = 0.01f
-            verticalAccuracyMeters = 0.1f
+            accuracy = 3.0f
+            elapsedRealtimeNanos = elapsed
         }
-        // Injectăm aceeași poziție în toate provider-ele LocationManager (network/gps/fused)
+        // GPS prin LocationManager (n5.r)
         for (p in activeProviders) {
             try { lm.setTestProviderLocation(p, fill(Location(p))) } catch (_: Exception) {}
         }
-        // Și în Play Services FLP direct (clienții care îl folosesc explicit)
+        // FLP setMockLocation (n5.g)
         if (flpActive) {
-            try { fusedClient.setMockLocation(fill(Location("fused"))) } catch (_: Exception) {}
+            try { fusedClient.setMockLocation(fill(Location(LocationManager.GPS_PROVIDER))) } catch (_: Exception) {}
         }
-    }
-
-    private fun calcBearing(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Float {
-        val dLon = Math.toRadians(toLon - fromLon)
-        val lat1 = Math.toRadians(fromLat)
-        val lat2 = Math.toRadians(toLat)
-        val y = sin(dLon) * cos(lat2)
-        val x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-        return ((Math.toDegrees(atan2(y, x)) + 360) % 360).toFloat()
     }
 
     /**
@@ -298,9 +283,9 @@ class MockService : Service() {
     }
 
     /**
-     * Înregistrează un test provider, ștergându-l întâi (ca să nu crape cu "already added")
-     * și reîncercând — exact tehnica FakeTraveler care reușește și pe FUSED_PROVIDER (API 31+).
-     * requiresSatellite=false pentru toate (inclusiv gps) ca în referință.
+     * Înregistrează un test provider — flag-uri EXACT ca Lockito (decompilat: n5.r.f →
+     * addTestProvider(p, 1,1,0,0,1,1,1,3,1)): requiresNetwork=true, requiresSatellite=true,
+     * supportsAltitude/Speed/Bearing=true, power=HIGH, accuracy=FINE. Remove-first + retry.
      */
     private fun addMockProvider(p: String, maxRetry: Int = 3) {
         var lastErr: Exception? = null
@@ -309,14 +294,14 @@ class MockService : Service() {
                 try { lm.removeTestProvider(p) } catch (_: Exception) {}
                 lm.addTestProvider(
                     p,
-                    /*requiresNetwork=*/   false,
-                    /*requiresSatellite=*/ false,
+                    /*requiresNetwork=*/   true,
+                    /*requiresSatellite=*/ true,
                     /*requiresCell=*/      false,
                     /*hasMonetaryCost=*/   false,
-                    /*supportsAltitude=*/  false,
+                    /*supportsAltitude=*/  true,
                     /*supportsSpeed=*/     true,
                     /*supportsBearing=*/   true,
-                    ProviderProperties.POWER_USAGE_LOW,
+                    ProviderProperties.POWER_USAGE_HIGH,
                     ProviderProperties.ACCURACY_FINE
                 )
                 lm.setTestProviderEnabled(p, true)
