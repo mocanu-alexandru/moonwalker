@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         requestPerms()
         pollStatus()
         showVersion()
+        ui.postDelayed({ UpdateManager.checkAndInstall(this, silent = true) }, 3000)
     }
 
     // ── Hartă ────────────────────────────────────────────────────────────────

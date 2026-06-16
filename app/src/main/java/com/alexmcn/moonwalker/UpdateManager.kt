@@ -26,13 +26,14 @@ object UpdateManager {
     private const val RELEASES_URL =
         "https://api.github.com/repos/mocanu-alexandru/moonwalker/releases/latest"
 
-    fun checkAndInstall(activity: Activity) {
-        Toast.makeText(activity, "Verifică update…", Toast.LENGTH_SHORT).show()
+    /** silent=true = verificare la pornire; nu arată toast dacă ești deja la zi */
+    fun checkAndInstall(activity: Activity, silent: Boolean = false) {
+        if (!silent) Toast.makeText(activity, "Verifică update…", Toast.LENGTH_SHORT).show()
         Thread {
             try {
                 val release = fetchLatestRelease()
                 if (release == null) {
-                    activity.runOnUiThread {
+                    if (!silent) activity.runOnUiThread {
                         Toast.makeText(activity,
                             "Nu s-a putut contacta GitHub", Toast.LENGTH_LONG).show()
                     }
@@ -44,7 +45,7 @@ object UpdateManager {
                     .getPackageInfo(activity.packageName, 0).versionName ?: "0"
 
                 if (!isNewer(remoteTag, currentVersion)) {
-                    activity.runOnUiThread {
+                    if (!silent) activity.runOnUiThread {
                         Toast.makeText(activity,
                             "Ești pe ultima versiune ($currentVersion)", Toast.LENGTH_LONG).show()
                     }
@@ -63,7 +64,7 @@ object UpdateManager {
                 }
 
                 if (apkUrl == null) {
-                    activity.runOnUiThread {
+                    if (!silent) activity.runOnUiThread {
                         Toast.makeText(activity,
                             "Release $remoteTag nu are APK atașat", Toast.LENGTH_LONG).show()
                     }
@@ -72,15 +73,15 @@ object UpdateManager {
 
                 val finalUrl = apkUrl
                 activity.runOnUiThread {
-                    Toast.makeText(activity,
-                        "Descarcă v$remoteTag…", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(activity, "Update v$remoteTag disponibil, se descarcă…",
+                        Toast.LENGTH_SHORT).show()
                     downloadAndInstall(activity, finalUrl, "moonwalker-$remoteTag.apk")
                 }
 
-            } catch (e: Exception) {
-                activity.runOnUiThread {
-                    Toast.makeText(activity,
-                        "Eroare update: ${e.message}", Toast.LENGTH_LONG).show()
+            } catch (_: Exception) {
+                if (!silent) activity.runOnUiThread {
+                    Toast.makeText(activity, "Eroare update: verifică internetul",
+                        Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
