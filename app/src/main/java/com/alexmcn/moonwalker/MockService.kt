@@ -126,35 +126,22 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // EXACT CA LOCKITO — două canale simultan, selectate împreună în UI-ul lui:
-        //   "Legacy (gps only)" = addTestProvider DOAR pe gps (NU network!) prin LocationManager
-        //   "Google (fused)"    = FusedLocationProviderClient.setMockMode + setMockLocation
-        // Network provider-ul era vinovatul vechiului salt haotic: fuziona prost cu fused.
-        // Legacy gps → path-ul de unlock al Bump (LocationManager). Fused → cache-ul
-        // getLastLocation (primul view) + harta live. Împreună acoperă toate canalele.
-        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
+        // Mockăm TOATE provider-ele LocationManager ca FakeTraveler/warren-bank (apps open-source
+        // care DEBLOCHEAZĂ astfel de aplicații): NETWORK + GPS + FUSED_PROVIDER (Android 12+).
+        // FUSED_PROVIDER (API 31+) e providerul canonic pe care îl citesc FLP, Maps și path-ul de
+        // unlock al Bump — îl rateam complet, de-aia Bump nu înregistra mișcarea.
+        activeProviders = mutableListOf(
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.GPS_PROVIDER
+        )
+        if (Build.VERSION.SDK_INT >= 31) activeProviders.add(LocationManager.FUSED_PROVIDER)
         try {
-            lm.addTestProvider(
-                LocationManager.GPS_PROVIDER,
-                /*requiresNetwork=*/   false,
-                /*requiresSatellite=*/ true,
-                /*requiresCell=*/      false,
-                /*hasMonetaryCost=*/   false,
-                /*supportsAltitude=*/  true,
-                /*supportsSpeed=*/     true,
-                /*supportsBearing=*/   true,
-                ProviderProperties.POWER_USAGE_LOW,
-                ProviderProperties.ACCURACY_FINE
-            )
-            lm.setTestProviderEnabled(LocationManager.GPS_PROVIDER, true)
+            for (p in activeProviders) addMockProvider(p)
         } catch (e: SecurityException) {
             statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
             stopEverything(); return
-        } catch (e: Exception) {
-            statusText = "EROARE mock provider: ${e.message}"
-            stopEverything(); return
         }
-        // Canalul "Google (fused)" — degradează grațios dacă eșuează (rămâne Legacy gps)
+        // Canalul Google Play Services FLP — degradează grațios dacă eșuează
         try {
             fusedClient.setMockMode(true)
                 .addOnSuccessListener { flpActive = true }
@@ -266,25 +253,24 @@ class MockService : Service() {
         val elapsed = SystemClock.elapsedRealtimeNanos()
         val brg = if (!prevLat.isNaN()) calcBearing(prevLat, prevLon, lat, lon) else 0f
         prevLat = lat; prevLon = lon
-        // Aceeași poziție pe ambele canale (ca Lockito Legacy+Google selectate împreună).
+        // Câmpuri ca în referința FakeTraveler (accuracy 3m realist, fără extras "satellites").
         fun fill(loc: Location) = loc.apply {
-            latitude = lat; longitude = lon; altitude = 100.0
-            accuracy = 1.0f
+            latitude = lat; longitude = lon; altitude = 3.0
+            accuracy = 3.0f
             time = now; elapsedRealtimeNanos = elapsed
             speed = (speedKmh / 3.6).toFloat()
             bearing = brg
-            bearingAccuracyDegrees = 0.5f
-            speedAccuracyMetersPerSecond = 0.05f
-            verticalAccuracyMeters = 0.2f
-            extras = Bundle().apply { putInt("satellites", 8) }
+            bearingAccuracyDegrees = 0.1f
+            speedAccuracyMetersPerSecond = 0.01f
+            verticalAccuracyMeters = 0.1f
         }
-        // Canal "Legacy (gps only)" — path-ul de unlock al Bump (LocationManager)
+        // Injectăm aceeași poziție în toate provider-ele LocationManager (network/gps/fused)
         for (p in activeProviders) {
             try { lm.setTestProviderLocation(p, fill(Location(p))) } catch (_: Exception) {}
         }
-        // Canal "Google (fused)" — cache getLastLocation + hartă live (toți clienții FLP)
+        // Și în Play Services FLP direct (clienții care îl folosesc explicit)
         if (flpActive) {
-            try { fusedClient.setMockLocation(fill(Location(LocationManager.GPS_PROVIDER))) } catch (_: Exception) {}
+            try { fusedClient.setMockLocation(fill(Location("fused"))) } catch (_: Exception) {}
         }
     }
 
@@ -313,6 +299,35 @@ class MockService : Service() {
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
         }
         activeProviders.clear()
+    }
+
+    /**
+     * Înregistrează un test provider, ștergându-l întâi (ca să nu crape cu "already added")
+     * și reîncercând — exact tehnica FakeTraveler care reușește și pe FUSED_PROVIDER (API 31+).
+     * requiresSatellite=false pentru toate (inclusiv gps) ca în referință.
+     */
+    private fun addMockProvider(p: String, maxRetry: Int = 3) {
+        var lastErr: Exception? = null
+        repeat(maxRetry) {
+            try {
+                try { lm.removeTestProvider(p) } catch (_: Exception) {}
+                lm.addTestProvider(
+                    p,
+                    /*requiresNetwork=*/   false,
+                    /*requiresSatellite=*/ false,
+                    /*requiresCell=*/      false,
+                    /*hasMonetaryCost=*/   false,
+                    /*supportsAltitude=*/  false,
+                    /*supportsSpeed=*/     true,
+                    /*supportsBearing=*/   true,
+                    ProviderProperties.POWER_USAGE_LOW,
+                    ProviderProperties.ACCURACY_FINE
+                )
+                lm.setTestProviderEnabled(p, true)
+                return
+            } catch (e: Exception) { lastErr = e }
+        }
+        throw SecurityException("Mock provider eșuat ($p): ${lastErr?.message}")
     }
 
     /** Oprește complet thread-ul de injecție anterior (sincron) înainte de o repornire. */
