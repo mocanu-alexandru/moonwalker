@@ -76,7 +76,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         Configuration.getInstance().userAgentValue = packageName
         setContentView(R.layout.activity_main)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         permsLbl       = findViewById(R.id.permsLbl)
         permsLbl.setOnClickListener { openBatterySettings() }
@@ -458,6 +457,8 @@ class MainActivity : AppCompatActivity() {
         ui.postDelayed(object : Runnable {
             override fun run() {
                 val running = MockService.running
+                if (running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 val lat = MockService.curLat
                 val lon = MockService.curLon
                 status.text = if (running) {
