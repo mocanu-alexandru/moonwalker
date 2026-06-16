@@ -5,10 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.location.Location
 import android.location.LocationManager
+import android.location.provider.ProviderProperties
 import android.os.*
 import androidx.core.app.NotificationCompat
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationServices
 import kotlin.math.*
 
 /**
@@ -41,11 +40,10 @@ class MockService : Service() {
         @Volatile var progress = 0.0
         @Volatile var pointsDone = 0
         @Volatile var statusText = "oprit"
-        @Volatile var flpActive = false   // true dacă setMockMode(true) a reușit
+        @Volatile var flpActive = false   // true dacă mock provider-ele (gps+network) sunt active
     }
 
     private lateinit var lm: LocationManager
-    private lateinit var fusedClient: FusedLocationProviderClient
     private var wakeLock: PowerManager.WakeLock? = null
     private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
@@ -58,7 +56,6 @@ class MockService : Service() {
     override fun onCreate() {
         super.onCreate()
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        fusedClient = LocationServices.getFusedLocationProviderClient(this)
         createChannel()
     }
 
@@ -113,22 +110,38 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // FLP PUR — un singur sistem de mock. Bump, Maps și Waze citesc toți prin FLP.
-        // setMockMode(true) golește cache-ul FLP și forțează raportarea DOAR a locațiilor
-        // din setMockLocation, pentru toți clienții (inclusiv alte procese).
-        // Rularea simultană cu addTestProvider(gps+network) crea DOUĂ surse de mock care
-        // se contraziceau → locația sărea haotic. Acum lăsăm FLP-ul singura sursă.
-        activeProviders = mutableListOf()
+        // PURE-LOCATIONMANAGER (ca Lockito) — mockăm gps + network prin addTestProvider.
+        // Bump citește path-ul de unlock prin LocationManager, NU prin FLP setMockMode:
+        // cu setMockMode harta lui Bump se mișca, dar unlock-ul zicea "fără locație de 1h+".
+        // FLP afișează harta fuzionând cele două provider-e mock (consistente între ele).
+        // Cheia ca să NU sară la acasă: wakelock + scutire baterie (deja active) ca injecția
+        // să nu fie throttle-uită — exact ce a făcut Lockito să meargă după dezactivarea bateriei.
+        activeProviders = mutableListOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER
+        )
         try {
-            fusedClient.setMockMode(true)
-                .addOnSuccessListener { flpActive = true }
-                .addOnFailureListener {
-                    flpActive = false
-                    statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
-                    stopEverything()
-                }
-        } catch (_: SecurityException) {
+            for (p in activeProviders) {
+                lm.addTestProvider(
+                    p,
+                    /*requiresNetwork=*/   false,
+                    /*requiresSatellite=*/ p == LocationManager.GPS_PROVIDER,
+                    /*requiresCell=*/      false,
+                    /*hasMonetaryCost=*/   false,
+                    /*supportsAltitude=*/  true,
+                    /*supportsSpeed=*/     true,
+                    /*supportsBearing=*/   true,
+                    ProviderProperties.POWER_USAGE_LOW,
+                    ProviderProperties.ACCURACY_FINE
+                )
+                lm.setTestProviderEnabled(p, true)
+            }
+            flpActive = true
+        } catch (e: SecurityException) {
             statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
+            stopEverything(); return
+        } catch (e: Exception) {
+            statusText = "EROARE mock provider: ${e.message}"
             stopEverything(); return
         }
 
@@ -168,9 +181,9 @@ class MockService : Service() {
                     curLat = lat; curLon = lon
                     progress = gen.progress()
                     pointsDone++
-                    val flp = if (flpActive) "FLP:DA" else "FLP:NU"
-                    statusText = "rulează • %.1f%% • %s".format(progress * 100, flp)
-                    updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, flp))
+                    val mock = if (flpActive) "MOCK:DA" else "MOCK:NU"
+                    statusText = "rulează • %.1f%% • %s".format(progress * 100, mock)
+                    updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, mock))
                     try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
                 }
                 prev = target
@@ -213,13 +226,12 @@ class MockService : Service() {
         val elapsed = SystemClock.elapsedRealtimeNanos()
         val brg = if (!prevLat.isNaN()) calcBearing(prevLat, prevLon, lat, lon) else 0f
         prevLat = lat; prevLon = lon
-        // Singura sursă: FLP. setMockLocation împinge poziția curentă direct în FLP,
-        // care o raportează tuturor clienților (Bump/Maps/Waze). Bearing + speed explicite
-        // ca FLP să estimeze viteza vectorial. Guard pe flpActive: nu împingem înainte ca
-        // setMockMode(true) să fi reușit (altfel apelul ar eșua oricum).
-        if (flpActive) {
+        // Injectăm aceeași poziție în toate provider-ele mock (gps + network).
+        // Bump citește path-ul de unlock prin LocationManager → trebuie să primească aici.
+        // FLP fuzionează cele două provider-e (identice) → harta tuturor clienților e curată.
+        for (p in activeProviders) {
             try {
-                fusedClient.setMockLocation(Location(LocationManager.GPS_PROVIDER).apply {
+                lm.setTestProviderLocation(p, Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
                     accuracy = 1.0f
                     time = now; elapsedRealtimeNanos = elapsed
@@ -249,9 +261,6 @@ class MockService : Service() {
         flpActive = false
         prevLat = Double.NaN; prevLon = Double.NaN
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
-        Handler(Looper.getMainLooper()).post {
-            try { fusedClient.setMockMode(false) } catch (_: Exception) {}
-        }
         for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
