@@ -1,10 +1,12 @@
 package com.alexmcn.moonwalker
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.*
 import android.view.View
+import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -39,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rowLbl: TextView
     private lateinit var stepLbl: TextView
     private lateinit var posLbl: TextView
+    private lateinit var permsLbl: TextView
     private lateinit var controlPanel: LinearLayout
     private lateinit var btnToggle: Button
 
@@ -71,7 +74,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         Configuration.getInstance().userAgentValue = packageName
         setContentView(R.layout.activity_main)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        permsLbl       = findViewById(R.id.permsLbl)
         map            = findViewById(R.id.map)
         zoneLbl        = findViewById(R.id.zoneLbl)
         countrySpinner = findViewById(R.id.countrySpinner)
@@ -529,6 +534,44 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
-    override fun onResume() { super.onResume(); map.onResume() }
+    override fun onResume() { super.onResume(); map.onResume(); refreshPerms() }
     override fun onPause()  { super.onPause();  map.onPause()  }
+
+    private fun refreshPerms() {
+        val issues = mutableListOf<String>()
+
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED)
+            issues.add("✗ GPS")
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED)
+            issues.add("✗ Notificări")
+
+        if (!isMockLocationEnabled())
+            issues.add("✗ Mock Location (Developer Options)")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls())
+            issues.add("✗ Instalare APK (permite surse necunoscute)")
+
+        if (issues.isEmpty()) {
+            permsLbl.visibility = View.GONE
+        } else {
+            permsLbl.text = issues.joinToString("   ")
+            permsLbl.setTextColor(0xFFFF5252.toInt())
+            permsLbl.visibility = View.VISIBLE
+        }
+    }
+
+    private fun isMockLocationEnabled(): Boolean {
+        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
+        val mode = appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_MOCK_LOCATION,
+            android.os.Process.myUid(),
+            packageName
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
 }
