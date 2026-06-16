@@ -245,7 +245,7 @@ class MockService : Service() {
             try {
                 val loc = Location(p).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
-                    accuracy = 0.1f
+                    accuracy = 3.0f
                     time = now; elapsedRealtimeNanos = elapsed
                     speed = (speedKmh / 3.6).toFloat()
                     bearing = brg
