@@ -106,10 +106,15 @@ class MockService : Service() {
         running = true
         val speedKmh = stepM * tickHz * 3.6
 
-        // Mockăm DOAR GPS_PROVIDER — lăsăm NETWORK_PROVIDER real (WiFi/cell).
-        // Dacă mockăm ambii, FLP primește toți furnizorii ca test → marchează output isMock=true.
-        // Cu un singur input mock (GPS) și unul real (WiFi), FLP nu propagă flag-ul.
-        activeProviders = mutableListOf(LocationManager.GPS_PROVIDER)
+        // Mockăm GPS + NETWORK. FLP (folosit de Bump/Maps/Waze) fuzionează GPS-ul cu
+        // poziția de rețea (WiFi). Dacă lași NETWORK real, FLP primește în paralel
+        // fix-ul WiFi de-acasă și fie îl preferă, fie diluează vectorul de viteză.
+        // isMock e setat oricum de framework pe orice test provider — nu se poate
+        // ascunde fără root. Bump nu verifică isMock, deci nu mockăm parțial.
+        activeProviders = mutableListOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER
+        )
         try {
             for (p in activeProviders) {
                 lm.addTestProvider(
@@ -133,20 +138,6 @@ class MockService : Service() {
             statusText = "EROARE mock provider: ${e.message}"
             stopEverything(); return
         }
-        // "fused" = providerul intern FLP pe unele Android — îl mockăm direct dacă există
-        try {
-            if (lm.allProviders.contains("fused")) {
-                lm.addTestProvider(
-                    "fused", false, false, false, false,
-                    true, true, true,
-                    ProviderProperties.POWER_USAGE_LOW,
-                    ProviderProperties.ACCURACY_FINE
-                )
-                lm.setTestProviderEnabled("fused", true)
-                activeProviders.add("fused")
-            }
-        } catch (_: Exception) {}
-
         flpActive = true  // LocationManager mock activ
 
         thread = Thread {
