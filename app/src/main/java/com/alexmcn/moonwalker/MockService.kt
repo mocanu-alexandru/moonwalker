@@ -160,15 +160,11 @@ class MockService : Service() {
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
-            // Decuplăm netezimea de viteză: injectăm la o rată internă fluidă (≥12Hz) indiferent
-            // de Hz-ul ales, mutând proporțional mai puțini metri per injecție. Viteza rămâne
-            // exactă (metersPerTick * injectHz = speedMps), dar mișcarea nu mai e sacadată.
-            val speedMps = stepM * tickHz                 // = speedKmh/3.6
-            // Rată internă ≥12Hz ȘI multiplu al tickHz, ca sub-pașii per waypoint să fie întregi
-            // (fără eroare de rotunjire în viteză) dar mișcarea să fie fluidă.
-            val injectHz = tickHz * max(1, ceil(12.0 / tickHz).toInt())
-            val tickMs = 1000L / injectHz
-            val metersPerTick = speedMps / injectHz       // distanță per injecție la rata fluidă
+            // Rata de injecție = tickHz (ca Lockito: la Hz=1 → 1 injecție/sec, 1000ms delay).
+            // Rate mari (12Hz+) către mai mulți provideri strică calculul de viteză al Bump
+            // (afișa 1 km/h) și par nenaturale → unlock-ul nu se declanșează. 1Hz = ca GPS real.
+            val tickMs = 1000L / tickHz
+            val metersPerTick = stepM     // un waypoint per tick → viteză = stepM*tickHz m/s
             pointsDone = 0
             var lastUiMs = 0L
 
