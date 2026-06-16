@@ -126,27 +126,28 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // EXACT ca Lockito (decompilat n5.r.g): mockăm TOȚI providerii din getAllProviders()
-        // MINUS "passive" (gps + network + fused + orice). Eticheta lui "gps only" e înșelătoare.
-        // n5.r.d() înregistrează fiecare cu try/catch per-provider, sărind peste cele ce eșuează.
-        activeProviders = lm.allProviders
-            .filter { it != LocationManager.PASSIVE_PROVIDER }
-            .toMutableList()
-        var anyOk = false
-        for (p in activeProviders.toList()) {
-            try { addMockProvider(p); anyOk = true }
-            catch (_: Exception) { activeProviders.remove(p) }
-        }
-        if (!anyOk) {
-            statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
-            stopEverything(); return
-        }
-        // Canalul Google Play Services FLP — degradează grațios dacă eșuează
+        // PURE-FLP — descoperit prin decompilarea Bump (co.amo.android.location):
+        //   Bump citește locația EXCLUSIV prin FusedLocationProviderClient (getLastLocation /
+        //   getCurrentLocation / requestLocationUpdates) și o etichetează:
+        //     mock = location.isMock();  source = mock ? SIMULATOR : PHONE
+        //   Core-ul Rust acceptă unlock-ul DOAR pentru PHONE.
+        //   • LocationManager.addTestProvider → isMock=TRUE forțat de sistem → SIMULATOR → respins.
+        //   • FLP.setMockLocation → isMock=FALSE (controlăm obiectul Location) → PHONE → acceptat.
+        //   Deci NU mai mockăm niciun provider LocationManager (poluau canalul fused cu isMock=true);
+        //   doar setMockMode + setMockLocation cu un Location curat (fără setIsFromMockProvider).
+        activeProviders = mutableListOf()
         try {
             fusedClient.setMockMode(true)
                 .addOnSuccessListener { flpActive = true }
-                .addOnFailureListener { flpActive = false }
-        } catch (_: SecurityException) { flpActive = false }
+                .addOnFailureListener {
+                    flpActive = false
+                    statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
+                    stopEverything()
+                }
+        } catch (_: SecurityException) {
+            statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
+            stopEverything(); return
+        }
 
         // Păstrăm ultima locație între rulări. Dacă există o rulare anterioară (curLat valid):
         //  - o injectăm IMEDIAT în provider-ele proaspete (FLP nu mai cade pe acasă în gol)
