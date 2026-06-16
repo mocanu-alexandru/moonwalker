@@ -57,6 +57,12 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
     private var isVertical = false
 
+    // Ultima locație reală cunoscută (capturată cât timp mock-ul NU rulează) — pt butonul "acasă"
+    private var homeLocation: GeoPoint? = null
+    private val lm by lazy {
+        getSystemService(LOCATION_SERVICE) as android.location.LocationManager
+    }
+
     // ── Stare spinere ────────────────────────────────────────────────────────
     // Tracking poziție ca să prevenim cascade spurioase onItemSelected
     private var countryPos = -1
@@ -427,6 +433,24 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnUpdate).setOnClickListener {
             UpdateManager.checkAndInstall(this)
         }
+        findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
+    }
+
+    /** Centrează harta pe ultima locație reală cunoscută (acasă). */
+    private fun goHome() {
+        val target = homeLocation ?: run {
+            val loc = try {
+                lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+                    ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+            } catch (_: SecurityException) { null }
+            loc?.let { GeoPoint(it.latitude, it.longitude) }
+        }
+        if (target != null) {
+            map.controller.animateTo(target)
+            map.controller.setZoom(16.0)
+        } else {
+            toast("Locație necunoscută încă")
+        }
     }
 
     // ── Pornire serviciu ──────────────────────────────────────────────────────
@@ -459,6 +483,14 @@ class MainActivity : AppCompatActivity() {
                 val running = MockService.running
                 if (running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                // Cât timp mock-ul NU rulează, getLastKnownLocation = locația reală → o reținem ca "acasă"
+                if (!running) {
+                    try {
+                        val real = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
+                            ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
+                        if (real != null) homeLocation = GeoPoint(real.latitude, real.longitude)
+                    } catch (_: SecurityException) {}
+                }
                 val lat = MockService.curLat
                 val lon = MockService.curLon
                 status.text = if (running) {

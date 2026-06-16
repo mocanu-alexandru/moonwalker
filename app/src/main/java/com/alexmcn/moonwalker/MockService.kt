@@ -161,6 +161,14 @@ class MockService : Service() {
                 .addOnFailureListener { flpActive = false }
         } catch (_: SecurityException) { flpActive = false }
 
+        // Păstrăm ultima locație între rulări. Dacă există o rulare anterioară (curLat valid):
+        //  - o injectăm IMEDIAT în provider-ele proaspete (FLP nu mai cade pe acasă în gol)
+        //  - o folosim și ca ORIGINE a tranziției (nu realStart=acasă), deci traseul nou
+        //    continuă lin din ultima poziție, fără salt la domiciliu.
+        val lastValid = curLat != 0.0 && !curLat.isNaN()
+        val transitionOrigin: DoubleArray? = if (lastValid) doubleArrayOf(curLat, curLon) else realStart
+        if (lastValid) pushLocation(curLat, curLon, 0.0)
+
         thread = Thread {
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical)
@@ -172,10 +180,10 @@ class MockService : Service() {
             val metersPerTick = stepM
             pointsDone = 0
 
-            // Tranziție lină de la locația reală la primul waypoint din traseu
+            // Tranziție lină de la ultima poziție (sau locația reală la prima rulare) spre traseu
             val firstPt = gen.next()
             var prev: DoubleArray? = if (firstPt != null) {
-                if (realStart != null) doTransition(realStart, firstPt, tickMs, speedKmh)
+                if (transitionOrigin != null) doTransition(transitionOrigin, firstPt, tickMs, speedKmh)
                 firstPt
             } else null
 
