@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.location.Location
 import android.location.LocationManager
-import android.location.provider.ProviderProperties
 import android.os.*
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -114,46 +113,24 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // Mockăm GPS + NETWORK. FLP (folosit de Bump/Maps/Waze) fuzionează GPS-ul cu
-        // poziția de rețea (WiFi). Dacă lași NETWORK real, FLP primește în paralel
-        // fix-ul WiFi de-acasă și fie îl preferă, fie diluează vectorul de viteză.
-        // isMock e setat oricum de framework pe orice test provider — nu se poate
-        // ascunde fără root. Bump nu verifică isMock, deci nu mockăm parțial.
-        activeProviders = mutableListOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER
-        )
-        try {
-            for (p in activeProviders) {
-                lm.addTestProvider(
-                    p,
-                    /*requiresNetwork=*/   false,
-                    /*requiresSatellite=*/ p == LocationManager.GPS_PROVIDER,
-                    /*requiresCell=*/      false,
-                    /*hasMonetaryCost=*/   false,
-                    /*supportsAltitude=*/  true,
-                    /*supportsSpeed=*/     true,
-                    /*supportsBearing=*/   true,
-                    ProviderProperties.POWER_USAGE_LOW,
-                    ProviderProperties.ACCURACY_FINE
-                )
-                lm.setTestProviderEnabled(p, true)
-            }
-        } catch (e: SecurityException) {
-            statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
-            stopEverything(); return
-        } catch (e: Exception) {
-            statusText = "EROARE mock provider: ${e.message}"
-            stopEverything(); return
-        }
-        // setMockMode(true) înlocuiește complet outputul FLP (inclusiv NLP intern cu WiFi real).
-        // Fără asta, FLP amestecă mock GPS cu locația WiFi reală (acasă) → două locații vizibile.
-        // onStartCommand rulează pe main thread, deci apelăm direct.
+        // FLP PUR — un singur sistem de mock. Bump, Maps și Waze citesc toți prin FLP.
+        // setMockMode(true) golește cache-ul FLP și forțează raportarea DOAR a locațiilor
+        // din setMockLocation, pentru toți clienții (inclusiv alte procese).
+        // Rularea simultană cu addTestProvider(gps+network) crea DOUĂ surse de mock care
+        // se contraziceau → locația sărea haotic. Acum lăsăm FLP-ul singura sursă.
+        activeProviders = mutableListOf()
         try {
             fusedClient.setMockMode(true)
                 .addOnSuccessListener { flpActive = true }
-                .addOnFailureListener { flpActive = false }
-        } catch (_: SecurityException) { flpActive = false }
+                .addOnFailureListener {
+                    flpActive = false
+                    statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
+                    stopEverything()
+                }
+        } catch (_: SecurityException) {
+            statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
+            stopEverything(); return
+        }
 
         thread = Thread {
 
@@ -236,12 +213,13 @@ class MockService : Service() {
         val elapsed = SystemClock.elapsedRealtimeNanos()
         val brg = if (!prevLat.isNaN()) calcBearing(prevLat, prevLon, lat, lon) else 0f
         prevLat = lat; prevLon = lon
-        // Acuratețe 0.1m bate WiFi real (~15-30m) → FLP preferă GPS-ul nostru.
-        // Bearing explicit ajută FLP să estimeze viteza vectorial, nu doar scalar.
-        // Fără setMockMode, output-ul FLP NU are isMock=true → Bump și Maps acceptă locația.
-        for (p in activeProviders) {
+        // Singura sursă: FLP. setMockLocation împinge poziția curentă direct în FLP,
+        // care o raportează tuturor clienților (Bump/Maps/Waze). Bearing + speed explicite
+        // ca FLP să estimeze viteza vectorial. Guard pe flpActive: nu împingem înainte ca
+        // setMockMode(true) să fi reușit (altfel apelul ar eșua oricum).
+        if (flpActive) {
             try {
-                val loc = Location(p).apply {
+                fusedClient.setMockLocation(Location(LocationManager.GPS_PROVIDER).apply {
                     latitude = lat; longitude = lon; altitude = 100.0
                     accuracy = 1.0f
                     time = now; elapsedRealtimeNanos = elapsed
@@ -251,22 +229,6 @@ class MockService : Service() {
                     speedAccuracyMetersPerSecond = 0.05f
                     verticalAccuracyMeters = 0.2f
                     extras = Bundle().apply { putInt("satellites", 8) }
-                }
-                lm.setTestProviderLocation(p, loc)
-            } catch (_: Exception) {}
-        }
-        // Injectăm și direct în FLP — suprascrie NLP-ul intern (WiFi real) care raporta acasă
-        if (flpActive) {
-            try {
-                fusedClient.setMockLocation(Location("fused").apply {
-                    latitude = lat; longitude = lon; altitude = 100.0
-                    accuracy = 1.0f
-                    time = now; elapsedRealtimeNanos = elapsed
-                    speed = (speedKmh / 3.6).toFloat()
-                    bearing = brg
-                    bearingAccuracyDegrees = 0.5f
-                    speedAccuracyMetersPerSecond = 0.05f
-                    verticalAccuracyMeters = 0.2f
                 })
             } catch (_: Exception) {}
         }
