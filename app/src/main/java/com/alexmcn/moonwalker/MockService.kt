@@ -149,13 +149,11 @@ class MockService : Service() {
             stopEverything(); return
         }
 
-        // Păstrăm ultima locație între rulări. Dacă există o rulare anterioară (curLat valid):
-        //  - o injectăm IMEDIAT în provider-ele proaspete (FLP nu mai cade pe acasă în gol)
-        //  - o folosim și ca ORIGINE a tranziției (nu realStart=acasă), deci traseul nou
-        //    continuă lin din ultima poziție, fără salt la domiciliu.
-        val lastValid = curLat != 0.0 && !curLat.isNaN()
-        val transitionOrigin: DoubleArray? = if (lastValid) doubleArrayOf(curLat, curLon) else realStart
-        if (lastValid) pushLocation(curLat, curLon, 0.0)
+        // FĂRĂ teleport: pornim din locația REALĂ curentă și ne apropiem CONTINUU de traseu, la
+        // viteza configurată. Bump (core Rust) aruncă locațiile "warped" (teleportate); un salt
+        // de-acasă direct în zonă ar face fiecare punct al traseului "warped" față de ultima
+        // locație acceptată de Bump (acasă) → toate respinse, niciun footprint.
+        val transitionOrigin: DoubleArray? = realStart
 
         thread = Thread {
 
@@ -172,7 +170,7 @@ class MockService : Service() {
             // Tranziție lină de la ultima poziție (sau locația reală la prima rulare) spre traseu
             val firstPt = gen.next()
             var prev: DoubleArray? = if (firstPt != null) {
-                if (transitionOrigin != null) doTransition(transitionOrigin, firstPt, tickMs, speedKmh)
+                if (transitionOrigin != null) doTransition(transitionOrigin, firstPt, tickMs, speedKmh, metersPerTick)
                 firstPt
             } else null
 
@@ -218,28 +216,24 @@ class MockService : Service() {
     }
 
     /**
-     * Injectează treptat de la `from` (locația reală) la `to` (primul waypoint al traseului).
-     * FLP folosește filtrare Kalman; o teleportare instantă e respinsă sau cauzează jumping.
-     * Returnează `to` ca să devină `prev` în bucla principală.
+     * Apropiere CONTINUĂ de la `from` (locația reală curentă) la `to` (primul waypoint), la
+     * viteza configurată — pași de `metersPerTick` metri, exact ca în traseu. Așa Bump vede o
+     * "deplasare" fizică reală (nu un teleport "warped"), iar ultima locație acceptată de Bump
+     * urcă pas cu pas spre zonă în loc să rămână blocată acasă.
      */
-    private fun doTransition(from: DoubleArray, to: DoubleArray, tickMs: Long, speedKmh: Double): DoubleArray {
-        // Nu injectăm niciodată locația reală (acasă) — FLP ar învăța-o ca referință
-        // și ar continua să tragă spre ea. Pornim direct la țintă sau interpolăm de acolo.
+    private fun doTransition(from: DoubleArray, to: DoubleArray, tickMs: Long,
+                             speedKmh: Double, metersPerTick: Double): DoubleArray {
         val distM = RouteGenerator.haversine(from, to)
-        if (distM < 500.0) return to
-        val nSteps = when {
-            distM < 5_000.0  -> 5
-            distM < 50_000.0 -> 10
-            else             -> 15
-        }
-        for (s in 1..nSteps) {
+        if (distM < metersPerTick) return to
+        val steps = max(1, ceil(distM / metersPerTick).toInt())
+        for (s in 1..steps) {
             if (stopFlag) break
-            val t = s.toDouble() / nSteps
+            val t = s.toDouble() / steps
             val lat = from[0] + (to[0] - from[0]) * t
             val lon = from[1] + (to[1] - from[1]) * t
-            pushLocation(lat, lon, speedKmh * t)
+            pushLocation(lat, lon, speedKmh)
             curLat = lat; curLon = lon
-            statusText = "pornire…"
+            statusText = "apropiere de zonă… %.0f%%".format(t * 100)
             try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
         }
         return to

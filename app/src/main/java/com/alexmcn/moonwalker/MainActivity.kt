@@ -449,9 +449,11 @@ class MainActivity : AppCompatActivity() {
      *   • orientare: rânduri pe latura LUNGĂ a zonei (mai puține întoarceri)
      */
     private fun applyOptimalCoverage() {
+        // Viteză REALISTĂ (90 km/h = mașină) — Bump aruncă locațiile "warped"/teleport, iar
+        // viteze nerealiste (sute de km/h) par teleport. 25 m/s acoperă bine fără să fie respins.
         rowBar.progress = 210      // rowM = 210 m
-        hzBar.progress  = 3        // Hz = progress + 1 = 4
-        stepBar.progress = 34      // stepM = progress + 1 = 35 m  → 35 × 4 = 140 m/s = 504 km/h
+        hzBar.progress  = 0        // Hz = progress + 1 = 1
+        stepBar.progress = 24      // stepM = progress + 1 = 25 m  → 25 × 1 = 25 m/s = 90 km/h
 
         // Orientează rândurile pe latura lungă: dacă zona e mai înaltă N-S decât lată E-V → vertical
         selectedPoly?.let { poly ->
@@ -465,7 +467,7 @@ class MainActivity : AppCompatActivity() {
 
         refreshPreview()
         estimateAndShow()
-        toast("Optim Bump: rânduri 210m • 35m×4Hz = 504 km/h • fără goluri (H3 rez9)")
+        toast("Optim Bump: rânduri 210m • 25m×1Hz = 90 km/h realist • fără teleport")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */
