@@ -191,8 +191,9 @@ class MockService : Service() {
                     curLat = lat; curLon = lon
                     progress = gen.progress()
                     pointsDone++
-                    statusText = "rulează • %.1f%%".format(progress * 100)
-                    updateNotif("%.1f%% • %d pct".format(progress * 100, pointsDone))
+                    val flp = if (flpActive) "FLP:DA" else "FLP:NU"
+                    statusText = "rulează • %.1f%% • %s".format(progress * 100, flp)
+                    updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, flp))
                     try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
                 }
                 prev = target
