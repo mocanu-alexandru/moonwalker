@@ -44,7 +44,7 @@ class MockService : Service() {
     }
 
     private lateinit var lm: LocationManager
-    // Lista efectivă de provideri activi — construită dinamic la fiecare start
+    private var wakeLock: PowerManager.WakeLock? = null
     private var activeProviders = mutableListOf<String>()
     private var thread: Thread? = null
     @Volatile private var stopFlag = false
@@ -105,6 +105,10 @@ class MockService : Service() {
         stopFlag = false
         running = true
         val speedKmh = stepM * tickHz * 3.6
+
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
+            .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
         // Mockăm GPS + NETWORK. FLP (folosit de Bump/Maps/Waze) fuzionează GPS-ul cu
         // poziția de rețea (WiFi). Dacă lași NETWORK real, FLP primește în paralel
@@ -272,6 +276,7 @@ class MockService : Service() {
         running = false
         flpActive = false
         prevLat = Double.NaN; prevLon = Double.NaN
+        wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
         for (p in activeProviders) {
             try { lm.setTestProviderEnabled(p, false) } catch (_: Exception) {}
             try { lm.removeTestProvider(p) } catch (_: Exception) {}

@@ -4,7 +4,9 @@ import android.Manifest
 import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.*
+import android.provider.Settings
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -77,6 +79,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         permsLbl       = findViewById(R.id.permsLbl)
+        permsLbl.setOnClickListener { openBatterySettings() }
         map            = findViewById(R.id.map)
         zoneLbl        = findViewById(R.id.zoneLbl)
         countrySpinner = findViewById(R.id.countrySpinner)
@@ -489,6 +492,19 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (need.isNotEmpty()) ActivityCompat.requestPermissions(this, need.toTypedArray(), 1)
+
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) openBatterySettings()
+    }
+
+    private fun openBatterySettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            })
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
     }
 
     private fun makeDotIcon(): android.graphics.drawable.BitmapDrawable {
@@ -556,10 +572,14 @@ class MainActivity : AppCompatActivity() {
             !packageManager.canRequestPackageInstalls())
             issues.add("✗ Instalare APK (permite surse necunoscute)")
 
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName))
+            issues.add("✗ Optimizare baterie activă — atinge pentru a dezactiva")
+
         if (issues.isEmpty()) {
             permsLbl.visibility = View.GONE
         } else {
-            permsLbl.text = issues.joinToString("   ")
+            permsLbl.text = issues.joinToString("\n")
             permsLbl.setTextColor(0xFFFF5252.toInt())
             permsLbl.visibility = View.VISIBLE
         }
