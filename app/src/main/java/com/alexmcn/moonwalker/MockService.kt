@@ -287,27 +287,34 @@ class MockService : Service() {
     }
 
     /**
-     * Înregistrează un test provider — flag-uri EXACT ca Lockito (decompilat: n5.r.f →
-     * addTestProvider(p, 1,1,0,0,1,1,1,3,1)): requiresNetwork=true, requiresSatellite=true,
-     * supportsAltitude/Speed/Bearing=true, power=HIGH, accuracy=FINE. Remove-first + retry.
+     * Înregistrează un test provider COPIIND proprietățile reale ale providerului (ca Lockito
+     * n5.r.f): dacă providerul există, oglindim requiresNetwork/Satellite/Cell, supports*,
+     * power, accuracy reale; altfel fallback (true,true,false,false,true,true,true,HIGH,FINE).
+     * Așa "network" nu mai pretinde greșit satelit/FINE. Remove-first + retry.
      */
     private fun addMockProvider(p: String, maxRetry: Int = 3) {
         var lastErr: Exception? = null
         repeat(maxRetry) {
             try {
                 try { lm.removeTestProvider(p) } catch (_: Exception) {}
-                lm.addTestProvider(
-                    p,
-                    /*requiresNetwork=*/   true,
-                    /*requiresSatellite=*/ true,
-                    /*requiresCell=*/      false,
-                    /*hasMonetaryCost=*/   false,
-                    /*supportsAltitude=*/  true,
-                    /*supportsSpeed=*/     true,
-                    /*supportsBearing=*/   true,
-                    ProviderProperties.POWER_USAGE_HIGH,
-                    ProviderProperties.ACCURACY_FINE
-                )
+                if (Build.VERSION.SDK_INT >= 31) {
+                    val pr = try { lm.getProviderProperties(p) } catch (_: Exception) { null }
+                    if (pr != null) lm.addTestProvider(
+                        p, pr.hasNetworkRequirement(), pr.hasSatelliteRequirement(),
+                        pr.hasCellRequirement(), pr.hasMonetaryCost(), pr.hasAltitudeSupport(),
+                        pr.hasSpeedSupport(), pr.hasBearingSupport(), pr.powerUsage, pr.accuracy)
+                    else lm.addTestProvider(p, true, true, false, false, true, true, true,
+                        ProviderProperties.POWER_USAGE_HIGH, ProviderProperties.ACCURACY_FINE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    val lp = try { lm.getProvider(p) } catch (_: Exception) { null }
+                    @Suppress("DEPRECATION")
+                    if (lp != null) lm.addTestProvider(
+                        p, lp.requiresNetwork(), lp.requiresSatellite(), lp.requiresCell(),
+                        lp.hasMonetaryCost(), lp.supportsAltitude(), lp.supportsSpeed(),
+                        lp.supportsBearing(), lp.powerRequirement, lp.accuracy)
+                    else lm.addTestProvider(p, true, true, false, false, true, true, true, 3, 1)
+                }
                 lm.setTestProviderEnabled(p, true)
                 return
             } catch (e: Exception) { lastErr = e }
