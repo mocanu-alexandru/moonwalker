@@ -33,6 +33,15 @@ android {
         buildConfig = true
     }
 
+    // libh3-java.so din AAR nu declară libm în NEEDED (→ "cannot locate symbol cos"). Folosim
+    // o copie patched (patchelf --add-needed libm.so) din src/main/jniLibs; pickFirst o preferă
+    // pe a noastră în fața celei din AAR.
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libh3-java.so"
+        }
+    }
+
     // Keystore consistent pentru toate build-urile (debug distribuit via repo, nu producție)
     val ksFile = rootProject.file("keystore/moonwalker-debug.p12")
     if (ksFile.exists()) {
