@@ -38,7 +38,9 @@ object UnlockedMask {
     @Synchronized
     fun refresh(ctx: Context): Boolean {
         try {
-            if (h3 == null) h3 = H3Core.newInstance()
+            // newSystemInstance() = încarcă .so nativ din jniLibs (System.loadLibrary), modul
+            // corect pe Android. newInstance() caută o resursă în classpath → eșuează pe Android.
+            if (h3 == null) h3 = H3Core.newSystemInstance()
 
             val userDir = su("ls -d /data/data/$BUMP_PKG/files/app_group/*/ 2>/dev/null | head -1")
                 ?.trim()?.takeIf { it.isNotBlank() }
@@ -68,7 +70,9 @@ object UnlockedMask {
             count = arr.size
             lastError = null
             return true
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable, NU doar Exception: H3 aruncă UnsatisfiedLinkError (un Error) dacă
+            // nativul nu se încarcă — trebuie prins ca să NU crape appul (fail-safe).
             return failKeep(e.message ?: e.javaClass.simpleName)
         }
     }
