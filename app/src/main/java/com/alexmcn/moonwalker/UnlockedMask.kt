@@ -1,68 +1,93 @@
 package com.alexmcn.moonwalker
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import com.uber.h3core.H3Core
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.Arrays
-import java.util.zip.GZIPInputStream
-import kotlin.math.floor
 
 /**
- * Masca zonelor deja DEBLOCATE în Bump (footprint), extrasă din SQLite-ul Bump
- * (tabel footprint_spatial__v1, celule H3 res-10) și rasterizată într-o grilă de 50 m.
+ * Zonele deja DEBLOCATE în Bump, citite DIRECT de pe device (root) din SQLite-ul Bump
+ * (tabel footprint_spatial__v1, celule H3 res-10) — fără mască statică, fără sincronizare
+ * manuală. Se reîmprospătează în foreground (la deschiderea appului și înainte de START),
+ * niciodată dintr-un job de fundal (Samsung l-ar omorî).
  *
- * Scop: la generarea traseului, sărim punctele care cad în zone deja deblocate,
- * ca botul să rute­ze DOAR prin hexagoanele blocate (mai puțin condus).
+ * Membership exact: testăm `H3Core.latLngToCell(lat,lon,10) ∈ celule deblocate`.
  *
- * Format fișier (gzip): [int32 LE count][count × int64 LE chei sortate].
- * Cheia = (iLat shl 17) or iLon, cu iLat=floor(lat/DLAT), iLon=floor(lon/DLON).
- * Constantele DLAT/DLON TREBUIE să fie identice cu cele din scriptul de generare (REF_LAT=47, GRID=50m).
+ * FAIL-SAFE: orice eroare (fără root, DB lipsă, H3 indisponibil) → isUnlocked = false
+ * pentru tot → nu se sare NIMIC → acoperire completă. Niciodată nu sărim o celulă blocată
+ * din cauza unei erori (a sări greșit pierde teritoriu; a NU sări doar mai conduce puțin).
  *
- * Sursă (în ordine): fișier extern getExternalFilesDir/unlocked_mask.bin.gz (reîmprospătabil
- * via `adb push`), altfel asset-ul bundle-uit unlocked_mask.bin.gz.
+ * Cerințe: Moonwalker rulează pe ACELAȘI telefon (rootat) ca Bump, cu Bump logat.
  */
 object UnlockedMask {
-    // Trebuie să corespundă generatorului (Python): GRID_M=50, REF_LAT=47.
-    private const val DLAT = 50.0 / 111_320.0
-    private const val DLON = 50.0 / (111_320.0 * 0.6819983600624985) // cos(47°)
+    private const val BUMP_PKG = "co.amo.android.location"
+    private const val RES = 10
 
-    @Volatile private var keys: LongArray? = null
+    @Volatile private var cells: LongArray? = null   // cell_index sortate (H3 res-10)
+    @Volatile private var h3: H3Core? = null
     @Volatile var count: Int = 0; private set
+    @Volatile var lastError: String? = null; private set
 
-    val isLoaded: Boolean get() = keys != null
+    val isReady: Boolean get() = cells != null && h3 != null
 
-    /** Încarcă masca o singură dată (idempotent). Sigur de apelat din Activity și din Service. */
+    /**
+     * Reîmprospătează setul din DB-ul Bump (blocant — rulează pe thread separat, ~1-2s).
+     * Întoarce true la succes. La eșec păstrează setul anterior dacă există (nu-l golește).
+     */
     @Synchronized
-    fun ensureLoaded(ctx: Context) {
-        if (keys != null) return
-        val bytes = try {
-            val ext = File(ctx.getExternalFilesDir(null), "unlocked_mask.bin.gz")
-            val raw = if (ext.exists()) ext.inputStream() else ctx.assets.open("unlocked_mask.bin.gz")
-            GZIPInputStream(raw).use { it.readBytes() }
-        } catch (_: Exception) { null } ?: return
-
+    fun refresh(ctx: Context): Boolean {
         try {
-            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            val n = buf.int
-            val arr = LongArray(n)
-            for (i in 0 until n) arr[i] = buf.long
-            // fișierul e deja sortat la generare; sortăm defensiv ca binarySearch să fie corect
+            if (h3 == null) h3 = H3Core.newInstance()
+
+            val userDir = su("ls -d /data/data/$BUMP_PKG/files/app_group/*/ 2>/dev/null | head -1")
+                ?.trim()?.takeIf { it.isNotBlank() }
+                ?: return failKeep("Bump negăsit/nelogat pe acest device")
+
+            val dst = File(ctx.cacheDir, "bump_fp.db")
+            // copie root → cache Moonwalker, lizibilă; +wal/shm pt. consistență WAL
+            su("cp ${userDir}main.db ${dst.path}; " +
+               "cp ${userDir}main.db-wal ${dst.path}-wal 2>/dev/null; " +
+               "cp ${userDir}main.db-shm ${dst.path}-shm 2>/dev/null; " +
+               "chmod 666 ${dst.path}*") ?: return failKeep("copiere DB eșuată (root?)")
+            if (!dst.exists()) return failKeep("DB Bump inaccesibil")
+
+            // deschidem read-write pe COPIE ca SQLite să poată face checkpoint la WAL
+            val db = SQLiteDatabase.openDatabase(dst.path, null, SQLiteDatabase.OPEN_READWRITE)
+            val arr: LongArray
+            try {
+                val cur = db.rawQuery("SELECT cell_index FROM footprint_spatial__v1", null)
+                arr = LongArray(cur.count)
+                var i = 0
+                while (cur.moveToNext()) arr[i++] = cur.getLong(0)
+                cur.close()
+            } finally { db.close() }
             arr.sort()
-            keys = arr
-            count = n
-        } catch (_: Exception) { /* fișier corupt → mască inactivă */ }
+
+            cells = arr
+            count = arr.size
+            lastError = null
+            return true
+        } catch (e: Exception) {
+            return failKeep(e.message ?: e.javaClass.simpleName)
+        }
     }
 
-    private fun keyOf(lat: Double, lon: Double): Long {
-        val iLat = floor(lat / DLAT).toLong()
-        val iLon = floor(lon / DLON).toLong()
-        return (iLat shl 17) or iLon
-    }
+    private fun failKeep(msg: String): Boolean { lastError = msg; return false }
 
-    /** True dacă punctul (lat,lon) e într-o celulă deja deblocată. */
+    /** True dacă punctul cade într-o celulă deblocată. Fail-safe: false la orice problemă. */
     fun isUnlocked(lat: Double, lon: Double): Boolean {
-        val k = keys ?: return false
-        return Arrays.binarySearch(k, keyOf(lat, lon)) >= 0
+        val c = cells ?: return false
+        val core = h3 ?: return false
+        val cell = try { core.latLngToCell(lat, lon, RES) } catch (_: Throwable) { return false }
+        return Arrays.binarySearch(c, cell) >= 0
     }
+
+    /** Rulează o comandă prin `su -c`; null la eșec/lipsă root. */
+    private fun su(cmd: String): String? = try {
+        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText()
+        p.waitFor()
+        if (p.exitValue() == 0) out else null
+    } catch (_: Exception) { null }
 }

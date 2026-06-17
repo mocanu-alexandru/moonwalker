@@ -74,7 +74,9 @@ class MockService : Service() {
         val loop = intent?.getBooleanExtra(EXTRA_LOOP, true) ?: true
         val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
         val skipUnlocked = intent?.getBooleanExtra(EXTRA_SKIP_UNLOCKED, false) ?: false
-        if (skipUnlocked) UnlockedMask.ensureLoaded(applicationContext)
+        // Asigură un set proaspăt chiar înainte de rulare (foreground). Fail-safe: dacă nu reușește,
+        // isUnlocked întoarce false peste tot → nu sare nimic → acoperire completă.
+        if (skipUnlocked && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.

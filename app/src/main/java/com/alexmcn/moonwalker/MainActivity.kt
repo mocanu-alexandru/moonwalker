@@ -457,18 +457,27 @@ class MainActivity : AppCompatActivity() {
      * doar prin zonele blocate. Încărcarea fișierului se face pe un thread separat.
      */
     private fun setupSkipUnlocked() {
+        chkSkipUnlocked.setOnClickListener {
+            // re-bifarea forțează un refresh proaspăt din Bump
+            if (chkSkipUnlocked.isChecked) refreshUnlocked()
+        }
+        refreshUnlocked()
+    }
+
+    /** Citește din nou zonele deblocate direct din Bump (root + H3), pe thread separat. */
+    private fun refreshUnlocked() {
         chkSkipUnlocked.isEnabled = false
-        chkSkipUnlocked.text = "🔓 Sari zonele deblocate (se încarcă…)"
+        chkSkipUnlocked.text = "🔓 Sari zonele deblocate (citesc din Bump…)"
         Thread {
-            UnlockedMask.ensureLoaded(applicationContext)
+            val ok = UnlockedMask.refresh(applicationContext)
             ui.post {
-                if (UnlockedMask.isLoaded) {
+                if (ok && UnlockedMask.isReady) {
                     chkSkipUnlocked.isEnabled = true
-                    chkSkipUnlocked.text = "🔓 Sari zonele deja deblocate (${UnlockedMask.count} pătrate)"
+                    chkSkipUnlocked.text = "🔓 Sari zonele deja deblocate (${UnlockedMask.count} celule)"
                 } else {
                     chkSkipUnlocked.isEnabled = false
                     chkSkipUnlocked.isChecked = false
-                    chkSkipUnlocked.text = "🔓 Sari zonele deblocate (mască indisponibilă)"
+                    chkSkipUnlocked.text = "🔓 Sari zonele deblocate (indisponibil: ${UnlockedMask.lastError ?: "necunoscut"})"
                 }
             }
         }.start()
@@ -529,7 +538,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra(MockService.EXTRA_VERTICAL,        isVertical)
         i.putExtra(MockService.EXTRA_LOOP,            true)
         i.putExtra(MockService.EXTRA_SKIP_FRACTION,  posBar.progress / 100.0)
-        i.putExtra(MockService.EXTRA_SKIP_UNLOCKED,  chkSkipUnlocked.isChecked && UnlockedMask.isLoaded)
+        i.putExtra(MockService.EXTRA_SKIP_UNLOCKED,  chkSkipUnlocked.isChecked && UnlockedMask.isReady)
         i.putExtra(MockService.EXTRA_POLY,           poly.joinToString(";") { "${it[0]},${it[1]}" })
         startForegroundService(i)
         val dir = if (isVertical) "vertical" else "orizontal"
