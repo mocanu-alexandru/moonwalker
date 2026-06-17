@@ -40,9 +40,13 @@ object UnlockedMask {
     fun refresh(ctx: Context): Boolean {
         try {
             Log.i(TAG, "refresh: start")
-            // newSystemInstance() = încarcă .so nativ din jniLibs (System.loadLibrary), modul
-            // corect pe Android. newInstance() caută o resursă în classpath → eșuează pe Android.
-            if (h3 == null) h3 = H3Core.newSystemInstance()
+            // newSystemInstance() = încarcă libh3-java.so via System.loadLibrary.
+            // libh3-java.so folosește cos/sin/lroundl dar NU linkează libm în NEEDED → trebuie
+            // să încărcăm întâi libm în namespace ca simbolurile matematice să se rezolve.
+            if (h3 == null) {
+                try { System.loadLibrary("m") } catch (t: Throwable) { Log.w(TAG, "loadLibrary m: $t") }
+                h3 = H3Core.newSystemInstance()
+            }
             Log.i(TAG, "refresh: H3 ok")
 
             val userDir = su("ls -d /data/data/$BUMP_PKG/files/app_group/*/ 2>/dev/null | head -1")
