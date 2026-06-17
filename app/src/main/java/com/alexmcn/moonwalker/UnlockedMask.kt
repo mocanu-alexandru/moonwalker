@@ -2,6 +2,7 @@ package com.alexmcn.moonwalker
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import com.uber.h3core.H3Core
 import java.io.File
 import java.util.Arrays
@@ -38,13 +39,16 @@ object UnlockedMask {
     @Synchronized
     fun refresh(ctx: Context): Boolean {
         try {
+            Log.i(TAG, "refresh: start")
             // newSystemInstance() = încarcă .so nativ din jniLibs (System.loadLibrary), modul
             // corect pe Android. newInstance() caută o resursă în classpath → eșuează pe Android.
             if (h3 == null) h3 = H3Core.newSystemInstance()
+            Log.i(TAG, "refresh: H3 ok")
 
             val userDir = su("ls -d /data/data/$BUMP_PKG/files/app_group/*/ 2>/dev/null | head -1")
                 ?.trim()?.takeIf { it.isNotBlank() }
                 ?: return failKeep("Bump negăsit/nelogat pe acest device")
+            Log.i(TAG, "refresh: userDir=$userDir")
 
             val dst = File(ctx.cacheDir, "bump_fp.db")
             // copie root → cache Moonwalker, lizibilă; +wal/shm pt. consistență WAL
@@ -69,15 +73,18 @@ object UnlockedMask {
             cells = arr
             count = arr.size
             lastError = null
+            Log.i(TAG, "refresh: OK cells=$count")
             return true
         } catch (e: Throwable) {
             // Throwable, NU doar Exception: H3 aruncă UnsatisfiedLinkError (un Error) dacă
             // nativul nu se încarcă — trebuie prins ca să NU crape appul (fail-safe).
+            Log.e(TAG, "refresh: FAIL", e)
             return failKeep(e.message ?: e.javaClass.simpleName)
         }
     }
 
-    private fun failKeep(msg: String): Boolean { lastError = msg; return false }
+    private fun failKeep(msg: String): Boolean { Log.w(TAG, "refresh: failKeep: $msg"); lastError = msg; return false }
+    private const val TAG = "UnlockedMask"
 
     /** True dacă punctul cade într-o celulă deblocată. Fail-safe: false la orice problemă. */
     fun isUnlocked(lat: Double, lon: Double): Boolean {
@@ -92,6 +99,7 @@ object UnlockedMask {
         val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
         val out = p.inputStream.bufferedReader().readText()
         p.waitFor()
+        Log.i(TAG, "su exit=${p.exitValue()} out=${out.take(120)}")
         if (p.exitValue() == 0) out else null
-    } catch (_: Exception) { null }
+    } catch (e: Exception) { Log.e(TAG, "su threw", e); null }
 }
