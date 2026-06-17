@@ -30,10 +30,16 @@ jobs:
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon
+        env:
+          # Token read-only (fine-grained, Contents:read) pt. auto-update dintr-un repo privat.
+          # Setează-l în repo → Settings → Secrets and variables → Actions → MW_UPDATE_TOKEN.
+          MW_UPDATE_TOKEN: ${{ secrets.MW_UPDATE_TOKEN }}
 
       - name: Get version name
         id: ver
-        run: echo "name=1.0.$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+        # +58 = versionBase din app/build.gradle.kts (offset după squash-ul istoricului).
+        # Tag-ul TREBUIE să corespundă versionName-ului din APK ca auto-update-ul să pornească.
+        run: echo "name=1.0.$(( $(git rev-list --count HEAD) + 58 ))" >> $GITHUB_OUTPUT
 
       - name: Rename APK
         run: mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/MoonWalker.apk

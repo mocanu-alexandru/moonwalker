@@ -20,9 +20,11 @@ import java.net.URL
 
 /**
  * Verifică ultima versiune pe GitHub Releases și instalează APK-ul dacă e mai nou.
- * Repo: mocanu-alexandru/moonwalker — trebuie să fie public SAU cu releases publice.
+ * Repo: mocanu-alexandru/moonwalker — PRIVAT; autentificare cu BuildConfig.UPDATE_TOKEN
+ * (token read-only injectat din CI). Pe repo privat: API authed → rezolvă asset-ul la URL
+ * semnat → DownloadManager (fără auth) → PackageInstaller.
  * Flow: "Verifică update" → API pe thread separat → comparare versionName
- *       → DownloadManager → FileProvider intent pentru instalare.
+ *       → resolveDownloadUrl → DownloadManager → PackageInstaller.
  */
 object UpdateManager {
 
@@ -56,17 +58,19 @@ object UpdateManager {
                 }
 
                 val assets = release.optJSONArray("assets")
-                var apkUrl: String? = null
+                var assetApiUrl: String? = null
                 if (assets != null) {
                     for (i in 0 until assets.length()) {
                         val a = assets.getJSONObject(i)
                         if (a.getString("name").endsWith(".apk")) {
-                            apkUrl = a.getString("browser_download_url"); break
+                            // url = endpoint API al asset-ului (merge cu token pe repo privat);
+                            // browser_download_url ar cere sesiune de browser.
+                            assetApiUrl = a.getString("url"); break
                         }
                     }
                 }
 
-                if (apkUrl == null) {
+                if (assetApiUrl == null) {
                     if (!silent) activity.runOnUiThread {
                         Toast.makeText(activity,
                             "Release $remoteTag nu are APK atașat", Toast.LENGTH_LONG).show()
@@ -74,11 +78,21 @@ object UpdateManager {
                     return@Thread
                 }
 
-                val finalUrl = apkUrl
+                // Repo privat: rezolvă pe acest thread URL-ul semnat (redirect), ca DownloadManager
+                // să descarce fără header Authorization (S3 respinge dubla autentificare).
+                val signedUrl = resolveDownloadUrl(assetApiUrl)
+                if (signedUrl == null) {
+                    if (!silent) activity.runOnUiThread {
+                        Toast.makeText(activity,
+                            "Nu s-a putut obține linkul de descărcare (token?)", Toast.LENGTH_LONG).show()
+                    }
+                    return@Thread
+                }
+
                 activity.runOnUiThread {
                     Toast.makeText(activity, "Update v$remoteTag disponibil, se descarcă…",
                         Toast.LENGTH_SHORT).show()
-                    downloadAndInstall(activity, finalUrl, "moonwalker-$remoteTag.apk")
+                    downloadAndInstall(activity, signedUrl, "moonwalker-$remoteTag.apk")
                 }
 
             } catch (_: Exception) {
@@ -94,6 +108,7 @@ object UpdateManager {
         val conn = URL(RELEASES_URL).openConnection() as HttpURLConnection
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        authorize(conn)
         conn.connectTimeout = 10_000
         conn.readTimeout = 10_000
         return try {
@@ -101,6 +116,34 @@ object UpdateManager {
                 JSONObject(conn.inputStream.bufferedReader().readText())
             else null
         } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** Adaugă header-ul Bearer dacă tokenul (injectat din CI) e prezent. */
+    private fun authorize(conn: HttpURLConnection) {
+        val tok = BuildConfig.UPDATE_TOKEN
+        if (tok.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $tok")
+    }
+
+    /**
+     * Pe repo privat, endpoint-ul API al asset-ului (cu Accept octet-stream + token) răspunde
+     * cu 302 către un URL semnat (codeload/S3). Întoarcem acel Location ca DownloadManager să
+     * descarce fără auth. Nu urmărim redirect-ul aici (altfel header-ul de auth ajunge la S3).
+     */
+    private fun resolveDownloadUrl(assetApiUrl: String): String? {
+        val conn = URL(assetApiUrl).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = false
+        conn.setRequestProperty("Accept", "application/octet-stream")
+        authorize(conn)
+        conn.connectTimeout = 10_000
+        conn.readTimeout = 10_000
+        return try {
+            when (conn.responseCode) {
+                in 300..399 -> conn.getHeaderField("Location")
+                else -> null
+            }
+        } catch (_: Exception) { null } finally {
             conn.disconnect()
         }
     }

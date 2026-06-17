@@ -23,6 +23,14 @@ android {
         targetSdk = 34
         versionCode = versionSerial
         versionName = "1.0.$versionSerial"
+
+        // Token read-only pt. auto-update dintr-un repo privat (injectat din CI via env
+        // MW_UPDATE_TOKEN; gol la build local → auto-update inactiv, restul appului merge).
+        buildConfigField("String", "UPDATE_TOKEN", "\"${System.getenv("MW_UPDATE_TOKEN") ?: ""}\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     // Keystore consistent pentru toate build-urile (debug distribuit via repo, nu producție)
