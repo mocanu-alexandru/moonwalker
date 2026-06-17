@@ -39,17 +39,14 @@ object UnlockedMask {
     @Synchronized
     fun refresh(ctx: Context): Boolean {
         try {
-            Log.i(TAG, "refresh: start")
             // newSystemInstance() = încarcă libh3-java.so via System.loadLibrary. Folosim o copie
             // patched a .so (libm adăugat în NEEDED) din jniLibs, deci cos/sin/lroundl se rezolvă.
             if (h3 == null) h3 = H3Core.newSystemInstance()
-            Log.i(TAG, "refresh: H3 ok")
 
             // find (fără glob de shell) → calea către main.db sub dir-ul de cont
             val dbPath = su("find /data/data/$BUMP_PKG/files/app_group -maxdepth 2 -name main.db -type f")
                 ?.lineSequence()?.map { it.trim() }?.firstOrNull { it.endsWith("main.db") }
                 ?: return failKeep("Bump main.db negăsit (logat?)")
-            Log.i(TAG, "refresh: dbPath=$dbPath")
 
             val dst = File(ctx.cacheDir, "bump_fp.db")
             // copie root → cache Moonwalker, lizibilă; +wal/shm pt. consistență WAL
@@ -102,7 +99,6 @@ object UnlockedMask {
         val p = ProcessBuilder("su", "-M", "-c", cmd).redirectErrorStream(true).start()
         val out = p.inputStream.bufferedReader().readText()
         p.waitFor()
-        Log.i(TAG, "su exit=${p.exitValue()} out=${out.take(200)}")
         if (p.exitValue() == 0) out else null
     } catch (e: Exception) { Log.e(TAG, "su threw", e); null }
 }

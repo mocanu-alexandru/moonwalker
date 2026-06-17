@@ -484,11 +484,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyOptimalCoverage() {
-        // Viteză REALISTĂ (90 km/h = mașină) — Bump aruncă locațiile "warped"/teleport, iar
-        // viteze nerealiste (sute de km/h) par teleport. 25 m/s acoperă bine fără să fie respins.
-        rowBar.progress = 210      // rowM = 210 m
-        hzBar.progress  = 0        // Hz = progress + 1 = 1
-        stepBar.progress = 24      // stepM = progress + 1 = 25 m  → 25 × 1 = 25 m/s = 90 km/h
+        // Bump folosește hexagoane H3 REZ-10 (latură ~66m, flat-to-flat ~114m) — CONFIRMAT pe date.
+        // Rânduri de 90m → fiecare bandă de hexagoane e tăiată, fără goluri (210m sărea benzi întregi).
+        // Viteză 90 km/h (25m × 1Hz): pasul inter-eșantion (25m) « 114m → fără hexagoane sărite pe rând;
+        // viteze mari par "warped"/teleport și Bump le respinge.
+        rowBar.progress = 90       // rowM = 90 m (acoperire res-10 fără goluri)
+        hzBar.progress  = 0        // Hz = 1
+        stepBar.progress = 24      // stepM = 25 m → 25 m/s = 90 km/h
+
+        // Sari zonele deja deblocate (dacă masca s-a citit din Bump) → rute­ază doar prin blocate.
+        if (UnlockedMask.isReady && !chkSkipUnlocked.isChecked) chkSkipUnlocked.isChecked = true
 
         // Orientează rândurile pe latura lungă: dacă zona e mai înaltă N-S decât lată E-V → vertical
         selectedPoly?.let { poly ->
@@ -502,7 +507,8 @@ class MainActivity : AppCompatActivity() {
 
         refreshPreview()
         estimateAndShow()
-        toast("Optim Bump: rânduri 210m • 25m×1Hz = 90 km/h realist • fără teleport")
+        val skipTxt = if (chkSkipUnlocked.isChecked) " • sare deblocatele" else ""
+        toast("Optim Bump res-10: rânduri 90m • 90 km/h$skipTxt")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */
