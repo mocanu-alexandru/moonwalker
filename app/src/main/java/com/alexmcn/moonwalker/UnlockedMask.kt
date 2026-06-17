@@ -45,17 +45,18 @@ object UnlockedMask {
             if (h3 == null) h3 = H3Core.newSystemInstance()
             Log.i(TAG, "refresh: H3 ok")
 
-            val userDir = su("ls -d /data/data/$BUMP_PKG/files/app_group/*/ 2>/dev/null | head -1")
-                ?.trim()?.takeIf { it.isNotBlank() }
-                ?: return failKeep("Bump negăsit/nelogat pe acest device")
-            Log.i(TAG, "refresh: userDir=$userDir")
+            // find (fără glob de shell) → calea către main.db sub dir-ul de cont
+            val dbPath = su("find /data/data/$BUMP_PKG/files/app_group -maxdepth 2 -name main.db -type f")
+                ?.lineSequence()?.map { it.trim() }?.firstOrNull { it.endsWith("main.db") }
+                ?: return failKeep("Bump main.db negăsit (logat?)")
+            Log.i(TAG, "refresh: dbPath=$dbPath")
 
             val dst = File(ctx.cacheDir, "bump_fp.db")
             // copie root → cache Moonwalker, lizibilă; +wal/shm pt. consistență WAL
-            su("cp ${userDir}main.db ${dst.path}; " +
-               "cp ${userDir}main.db-wal ${dst.path}-wal 2>/dev/null; " +
-               "cp ${userDir}main.db-shm ${dst.path}-shm 2>/dev/null; " +
-               "chmod 666 ${dst.path}*") ?: return failKeep("copiere DB eșuată (root?)")
+            su("cp '$dbPath' '${dst.path}'; " +
+               "cp '$dbPath-wal' '${dst.path}-wal'; " +
+               "cp '$dbPath-shm' '${dst.path}-shm'; " +
+               "chmod 666 '${dst.path}'*") ?: return failKeep("copiere DB eșuată (root?)")
             if (!dst.exists()) return failKeep("DB Bump inaccesibil")
 
             // deschidem read-write pe COPIE ca SQLite să poată face checkpoint la WAL
@@ -95,11 +96,13 @@ object UnlockedMask {
     }
 
     /** Rulează o comandă prin `su -c`; null la eșec/lipsă root. */
+    // -M / --mount-master: rulează în namespace-ul global de mount (procesul app are
+    // propriul mount namespace în care datele altor appuri pot să nu fie vizibile).
     private fun su(cmd: String): String? = try {
-        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+        val p = ProcessBuilder("su", "-M", "-c", cmd).redirectErrorStream(true).start()
         val out = p.inputStream.bufferedReader().readText()
         p.waitFor()
-        Log.i(TAG, "su exit=${p.exitValue()} out=${out.take(120)}")
+        Log.i(TAG, "su exit=${p.exitValue()} out=${out.take(200)}")
         if (p.exitValue() == 0) out else null
     } catch (e: Exception) { Log.e(TAG, "su threw", e); null }
 }
