@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permsLbl: TextView
     private lateinit var controlPanel: LinearLayout
     private lateinit var btnToggle: Button
+    private lateinit var chkSkipUnlocked: CheckBox
 
     // ── Stare zonă ───────────────────────────────────────────────────────────
     private var selectedPoly: List<DoubleArray>? = null
@@ -102,6 +103,8 @@ class MainActivity : AppCompatActivity() {
         posLbl         = findViewById(R.id.posLbl)
         controlPanel   = findViewById(R.id.controlPanel)
         btnToggle      = findViewById(R.id.btnToggle)
+        chkSkipUnlocked = findViewById(R.id.chkSkipUnlocked)
+        setupSkipUnlocked()
 
         setupMap()
         setupSpinners()
@@ -448,6 +451,29 @@ class MainActivity : AppCompatActivity() {
      *     din stepM=35 × Hz=4 = 140 m/s
      *   • orientare: rânduri pe latura LUNGĂ a zonei (mai puține întoarceri)
      */
+    /**
+     * Masca zonelor deja deblocate în Bump (extrasă din footprint). Când e bifat,
+     * generatorul de traseu sare punctele din celulele deblocate → botul rute­ază
+     * doar prin zonele blocate. Încărcarea fișierului se face pe un thread separat.
+     */
+    private fun setupSkipUnlocked() {
+        chkSkipUnlocked.isEnabled = false
+        chkSkipUnlocked.text = "🔓 Sari zonele deblocate (se încarcă…)"
+        Thread {
+            UnlockedMask.ensureLoaded(applicationContext)
+            ui.post {
+                if (UnlockedMask.isLoaded) {
+                    chkSkipUnlocked.isEnabled = true
+                    chkSkipUnlocked.text = "🔓 Sari zonele deja deblocate (${UnlockedMask.count} pătrate)"
+                } else {
+                    chkSkipUnlocked.isEnabled = false
+                    chkSkipUnlocked.isChecked = false
+                    chkSkipUnlocked.text = "🔓 Sari zonele deblocate (mască indisponibilă)"
+                }
+            }
+        }.start()
+    }
+
     private fun applyOptimalCoverage() {
         // Viteză REALISTĂ (90 km/h = mașină) — Bump aruncă locațiile "warped"/teleport, iar
         // viteze nerealiste (sute de km/h) par teleport. 25 m/s acoperă bine fără să fie respins.
@@ -503,6 +529,7 @@ class MainActivity : AppCompatActivity() {
         i.putExtra(MockService.EXTRA_VERTICAL,        isVertical)
         i.putExtra(MockService.EXTRA_LOOP,            true)
         i.putExtra(MockService.EXTRA_SKIP_FRACTION,  posBar.progress / 100.0)
+        i.putExtra(MockService.EXTRA_SKIP_UNLOCKED,  chkSkipUnlocked.isChecked && UnlockedMask.isLoaded)
         i.putExtra(MockService.EXTRA_POLY,           poly.joinToString(";") { "${it[0]},${it[1]}" })
         startForegroundService(i)
         val dir = if (isVertical) "vertical" else "orizontal"

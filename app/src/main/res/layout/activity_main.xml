@@ -140,6 +140,11 @@
             android:textSize="12sp"
             android:paddingTop="2dp" android:paddingBottom="2dp" />
 
+        <CheckBox android:id="@+id/chkSkipUnlocked"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="🔓 Sari zonele deja deblocate"
+            android:textSize="12sp" />
+
         <LinearLayout
             android:orientation="horizontal"
             android:layout_width="match_parent"

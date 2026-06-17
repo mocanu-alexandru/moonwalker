@@ -33,6 +33,7 @@ class MockService : Service() {
         const val EXTRA_ROW_M = "rowM"; const val EXTRA_STEP_M = "stepM"
         const val EXTRA_VERTICAL = "vertical"; const val EXTRA_LOOP = "loop"
         const val EXTRA_SKIP_FRACTION = "skipFraction"
+        const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"
 
         // stare observabilă pentru UI
@@ -72,6 +73,8 @@ class MockService : Service() {
         val vertical = intent?.getBooleanExtra(EXTRA_VERTICAL, false) ?: false
         val loop = intent?.getBooleanExtra(EXTRA_LOOP, true) ?: true
         val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
+        val skipUnlocked = intent?.getBooleanExtra(EXTRA_SKIP_UNLOCKED, false) ?: false
+        if (skipUnlocked) UnlockedMask.ensureLoaded(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
@@ -104,14 +107,14 @@ class MockService : Service() {
         } catch (_: SecurityException) { null }
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
-        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction, realStart)
+        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction, realStart, skipUnlocked)
         return START_STICKY
     }
 
     private fun startWalking(
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
-        realStart: DoubleArray? = null
+        realStart: DoubleArray? = null, skipUnlocked: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -157,7 +160,7 @@ class MockService : Service() {
 
         thread = Thread {
 
-            var gen = RouteGenerator(zone, rowM, stepM, vertical)
+            var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
             if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
             // Rata de injecție = tickHz (ca Lockito: la Hz=1 → 1 injecție/sec, 1000ms delay).
             // Rate mari (12Hz+) către mai mulți provideri strică calculul de viteză al Bump
@@ -177,7 +180,7 @@ class MockService : Service() {
             while (!stopFlag) {
                 val target = gen.next()
                 if (target == null) {
-                    if (loop) { gen = RouteGenerator(zone, rowM, stepM, vertical); continue }
+                    if (loop) { gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked); continue }
                     else { statusText = "GATA - zonă acoperită"; break }
                 }
 

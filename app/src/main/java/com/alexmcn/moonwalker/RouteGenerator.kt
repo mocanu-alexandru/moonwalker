@@ -12,7 +12,9 @@ class RouteGenerator(
     private val zone: Zone,
     private val rowSpacingM: Double = 130.0,
     private val stepM: Double = 75.0,
-    private val vertical: Boolean = false
+    private val vertical: Boolean = false,
+    /** Dacă true, punctele care cad în zone deja deblocate (UnlockedMask) sunt sărite. */
+    private val skipUnlocked: Boolean = false
 ) {
     private val M_LAT = 111_320.0
     private val latCenter = (zone.latMin + zone.latMax) / 2.0
@@ -32,6 +34,9 @@ class RouteGenerator(
 
     init { buildLine(0) }
 
+    private fun skip(lat: Double, lon: Double): Boolean =
+        skipUnlocked && UnlockedMask.isUnlocked(lat, lon)
+
     private fun buildLine(idx: Int) {
         if (idx >= nLines) { finished = true; currentLinePoints = emptyList(); return }
         val pts = ArrayList<DoubleArray>()
@@ -41,7 +46,7 @@ class RouteGenerator(
             val dLonStep = stepM / kLon
             var lon = zone.lonMin
             while (lon <= zone.lonMax) {
-                if (zone.contains(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
                 lon += dLonStep
             }
         } else {
@@ -49,7 +54,7 @@ class RouteGenerator(
             val dLatStep = stepM / M_LAT
             var lat = zone.latMax
             while (lat >= zone.latMin) {
-                if (zone.contains(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
                 lat -= dLatStep
             }
         }
