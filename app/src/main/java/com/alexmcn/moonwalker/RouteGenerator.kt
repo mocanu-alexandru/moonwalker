@@ -37,31 +37,40 @@ class RouteGenerator(
     private fun skip(lat: Double, lon: Double): Boolean =
         skipUnlocked && UnlockedMask.isUnlocked(lat, lon)
 
-    private fun buildLine(idx: Int) {
-        if (idx >= nLines) { finished = true; currentLinePoints = emptyList(); return }
-        val pts = ArrayList<DoubleArray>()
-        if (!vertical) {
-            val lat = zone.latMax - idx * dLatLine
-            val kLon = M_LAT * cos(Math.toRadians(lat))
-            val dLonStep = stepM / kLon
-            var lon = zone.lonMin
-            while (lon <= zone.lonMax) {
-                if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
-                lon += dLonStep
+    private fun buildLine(startIdx: Int) {
+        // Iterativ (nu recursiv): sare peste rândurile complet goale — frecvente când
+        // skipUnlocked elimină zone întregi deja deblocate — fără risc de StackOverflow.
+        var idx = startIdx
+        while (true) {
+            if (idx >= nLines) { finished = true; currentLinePoints = emptyList(); lineIndex = idx; return }
+            val pts = ArrayList<DoubleArray>()
+            if (!vertical) {
+                val lat = zone.latMax - idx * dLatLine
+                val kLon = M_LAT * cos(Math.toRadians(lat))
+                val dLonStep = stepM / kLon
+                var lon = zone.lonMin
+                while (lon <= zone.lonMax) {
+                    if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                    lon += dLonStep
+                }
+            } else {
+                val lon = zone.lonMin + idx * dLonLine
+                val dLatStep = stepM / M_LAT
+                var lat = zone.latMax
+                while (lat >= zone.latMin) {
+                    if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
+                    lat -= dLatStep
+                }
             }
-        } else {
-            val lon = zone.lonMin + idx * dLonLine
-            val dLatStep = stepM / M_LAT
-            var lat = zone.latMax
-            while (lat >= zone.latMin) {
-                if (zone.contains(lat, lon) && !skip(lat, lon)) pts.add(doubleArrayOf(lat, lon))
-                lat -= dLatStep
+            if (idx % 2 == 1) pts.reverse()
+            if (pts.isNotEmpty()) {
+                currentLinePoints = pts
+                colInLine = 0
+                lineIndex = idx
+                return
             }
+            idx++   // rând gol → treci la următorul
         }
-        if (idx % 2 == 1) pts.reverse()
-        currentLinePoints = pts
-        colInLine = 0
-        if (pts.isEmpty() && idx + 1 < nLines) buildLine(idx + 1)
     }
 
     fun next(): DoubleArray? {
