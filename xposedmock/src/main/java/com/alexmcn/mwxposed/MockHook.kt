@@ -3,6 +3,7 @@ package com.alexmcn.mwxposed
 import android.os.Parcel
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -31,9 +32,9 @@ class MockHook : IXposedHookLoadPackage {
                 }
             )
             // Belt-and-suspenders: dacă vreodată Bump ar citi prin getter, întoarce false.
-            XposedHelpers.findAndHookMethod(locationCls, "isMock", XC_MethodHook.returnConstant(false))
+            XposedHelpers.findAndHookMethod(locationCls, "isMock", XC_MethodReplacement.returnConstant(false))
             runCatching {
-                XposedHelpers.findAndHookMethod(locationCls, "isFromMockProvider", XC_MethodHook.returnConstant(false))
+                XposedHelpers.findAndHookMethod(locationCls, "isFromMockProvider", XC_MethodReplacement.returnConstant(false))
             }
             XposedBridge.log("MWMock: hooks installed for Bump")
         } catch (t: Throwable) {
