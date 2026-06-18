@@ -165,25 +165,21 @@ class MockService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
             .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
 
-        // PURE-FLP — descoperit prin decompilarea Bump (co.amo.android.location):
-        //   Bump citește locația EXCLUSIV prin FusedLocationProviderClient (getLastLocation /
-        //   getCurrentLocation / requestLocationUpdates) și o etichetează:
-        //     mock = location.isMock();  source = mock ? SIMULATOR : PHONE
-        //   Core-ul Rust acceptă unlock-ul DOAR pentru PHONE.
-        //   • LocationManager.addTestProvider → isMock=TRUE forțat de sistem → SIMULATOR → respins.
-        //   • FLP.setMockLocation → isMock=FALSE (controlăm obiectul Location) → PHONE → acceptat.
-        //   Deci NU mai mockăm niciun provider LocationManager (poluau canalul fused cu isMock=true);
-        //   doar setMockMode + setMockLocation cu un Location curat (fără setIsFromMockProvider).
+        // LOCKITO-PARITY — injecție prin LocationManager (GPS + network test providers), NU FLP.
+        //   De ce NU FLP setMockMode/setMockLocation:
+        //     • are rate-limit GMS "too fast" (~90 km/h max; >atât → "location delivery blocked - too fast")
+        //     • e marcat isMock=true → Bump îl vede source=Simulator → respins ca MockPosition
+        //   LocationManager test provider (ca Lockito): GMS îl fuzionează în FLP FĂRĂ "too fast"
+        //   (Lockito merge la 500+ km/h și deblochează), iar isMock e curățat de modulul Vector
+        //   (createFromParcel → setMock(false)) → source=Phone → acceptat.
         activeProviders = mutableListOf()
         try {
-            fusedClient.setMockMode(true)
-                .addOnSuccessListener { flpActive = true }
-                .addOnFailureListener {
-                    flpActive = false
-                    statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
-                    stopEverything()
-                }
-        } catch (_: SecurityException) {
+            addMockProvider(LocationManager.GPS_PROVIDER)
+            activeProviders.add(LocationManager.GPS_PROVIDER)
+            try { addMockProvider(LocationManager.NETWORK_PROVIDER); activeProviders.add(LocationManager.NETWORK_PROVIDER) }
+            catch (_: Exception) { /* network provider opțional */ }
+            flpActive = true   // reutilizat ca indicator "injecție activă" pentru UI
+        } catch (_: Exception) {
             statusText = "EROARE: app-ul nu e setat ca Mock Location în Developer Options"
             stopEverything(); return
         }
@@ -296,13 +292,10 @@ class MockService : Service() {
             accuracy = 3.0f
             elapsedRealtimeNanos = elapsed
         }
-        // GPS prin LocationManager (n5.r)
+        // Injecție DOAR prin LocationManager test providers (Lockito-style). GMS fuzionează GPS-ul
+        // în FLP fără rate-limit "too fast" → permite viteze mari (500+ km/h). FĂRĂ FLP setMockLocation.
         for (p in activeProviders) {
             try { lm.setTestProviderLocation(p, fill(Location(p))) } catch (_: Exception) {}
-        }
-        // FLP setMockLocation (n5.g)
-        if (flpActive) {
-            try { fusedClient.setMockLocation(fill(Location(LocationManager.GPS_PROVIDER))) } catch (_: Exception) {}
         }
     }
 
