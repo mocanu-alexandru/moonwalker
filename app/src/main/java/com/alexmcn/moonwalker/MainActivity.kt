@@ -497,11 +497,12 @@ class MainActivity : AppCompatActivity() {
     private fun applyOptimalCoverage() {
         // Bump folosește hexagoane H3 REZ-10 (latură ~66m, flat-to-flat ~114m) — CONFIRMAT pe date.
         // Rânduri de 90m → fiecare bandă de hexagoane e tăiată, fără goluri (210m sărea benzi întregi).
-        // Viteză 90 km/h (25m × 1Hz): pasul inter-eșantion (25m) « 114m → fără hexagoane sărite pe rând;
-        // viteze mari par "warped"/teleport și Bump le respinge.
+        // VITEZĂ MARE (ca Lockito ~500 km/h): injecția prin LocationManager NU are plafonul GMS
+        // "too fast" (≈90 km/h) al FLP, iar mișcarea CONTINUĂ la viteză mare nu e "warped" pentru
+        // Bump (Lockito mergea 500+ și deblochea). Pas 46m < 114m (latura hex res-10) → fără goluri.
         rowBar.progress = 90       // rowM = 90 m (acoperire res-10 fără goluri)
-        hzBar.progress  = 0        // Hz = 1
-        stepBar.progress = 24      // stepM = 25 m → 25 m/s = 90 km/h
+        hzBar.progress  = 2        // Hz = progress + 1 = 3
+        stepBar.progress = 45      // stepM = 46 m → 46 × 3 = 138 m/s ≈ 497 km/h
 
         // Sari zonele deja deblocate (dacă masca s-a citit din Bump) → rute­ază doar prin blocate.
         if (UnlockedMask.isReady && !chkSkipUnlocked.isChecked) chkSkipUnlocked.isChecked = true
@@ -519,7 +520,7 @@ class MainActivity : AppCompatActivity() {
         refreshPreview()
         estimateAndShow()
         val skipTxt = if (chkSkipUnlocked.isChecked) " • sare deblocatele" else ""
-        toast("Optim Bump res-10: rânduri 90m • 90 km/h$skipTxt")
+        toast("Optim Bump res-10: rânduri 90m • ~497 km/h$skipTxt")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */
