@@ -449,6 +449,7 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
         findViewById<Button>(R.id.btnOptim).setOnClickListener { applyOptimalCoverage() }
+        findViewById<Button>(R.id.btnAuto).setOnClickListener { startAuto() }
     }
 
     /**
@@ -492,6 +493,36 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    /**
+     * AUTO-extindere: pornește acoperirea automată în spirală din locația curentă, spre exterior
+     * (cel-mai-aproape-întâi), sărind zonele deblocate, la ~497 km/h, fără să mai selectezi zone.
+     * Necesită masca (root + Bump). Rulează până la STOP. Ține telefonul în split-screen cu Bump pe hartă.
+     */
+    private fun startAuto() {
+        if (!UnlockedMask.isReady) {
+            toast("Masca nu e gata (root/Bump?) — fără ea nu pot sări deblocatele"); return
+        }
+        // poly „ancoră" doar ca să treacă verificarea din service; auto folosește locația reală.
+        val h = homeLocation
+        val poly = if (h != null)
+            "%.5f,%.5f;%.5f,%.5f;%.5f,%.5f".format(
+                h.latitude - 0.003, h.longitude - 0.003,
+                h.latitude + 0.003, h.longitude + 0.003,
+                h.latitude + 0.003, h.longitude - 0.003)
+        else "47.157,27.577;47.163,27.583;47.163,27.577"
+        val i = Intent(this, MockService::class.java).apply {
+            putExtra(MockService.EXTRA_TICK_HZ, 3)         // 3 × 46m = 138 m/s ≈ 497 km/h
+            putExtra(MockService.EXTRA_ROW_M, 90.0)
+            putExtra(MockService.EXTRA_STEP_M, 46.0)
+            putExtra(MockService.EXTRA_VERTICAL, false)
+            putExtra(MockService.EXTRA_LOOP, false)
+            putExtra(MockService.EXTRA_AUTO, true)
+            putExtra(MockService.EXTRA_POLY, poly)
+        }
+        startForegroundService(i)
+        toast("🤖 AUTO pornit: extindere din locația ta • ~497 km/h • sare deblocatele • STOP ca să oprești")
     }
 
     private fun applyOptimalCoverage() {

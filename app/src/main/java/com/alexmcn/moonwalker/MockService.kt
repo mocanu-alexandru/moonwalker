@@ -34,6 +34,10 @@ class MockService : Service() {
         const val EXTRA_VERTICAL = "vertical"; const val EXTRA_LOOP = "loop"
         const val EXTRA_SKIP_FRACTION = "skipFraction"
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
+        const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
+        private const val AUTO_BLOCK_M = 3000.0          // latura unui bloc de acoperire (3 km)
+        private const val AUTO_MAX_BLOCKS = 50000        // plafon de siguranță (rază ~670 km)
+        private const val IASI_LAT = 47.16; private const val IASI_LON = 27.58  // fallback anchor
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
 
@@ -63,6 +67,7 @@ class MockService : Service() {
     private var holdThread: Thread? = null
     @Volatile private var holdStop = false
     private var curPolyKey = ""          // poly-ul rulării curente (pt. a ști dacă reluăm același traseu)
+    @Volatile private var lastUiMs = 0L  // throttling update notificare/status
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -84,9 +89,9 @@ class MockService : Service() {
         val loop = intent?.getBooleanExtra(EXTRA_LOOP, true) ?: true
         val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
         val skipUnlocked = intent?.getBooleanExtra(EXTRA_SKIP_UNLOCKED, false) ?: false
-        // Asigură un set proaspăt chiar înainte de rulare (foreground). Fail-safe: dacă nu reușește,
-        // isUnlocked întoarce false peste tot → nu sare nimic → acoperire completă.
-        if (skipUnlocked && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
+        val auto = intent?.getBooleanExtra(EXTRA_AUTO, false) ?: false
+        // Auto sare MEREU deblocatele → are nevoie de mască. Asigură un set proaspăt înainte de rulare.
+        if ((skipUnlocked || auto) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
@@ -141,14 +146,15 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            resumeOrigin ?: realStart, skipUnlocked, resumeRow)
+            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto)
         return START_STICKY
     }
 
     private fun startWalking(
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
-        realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1
+        realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
+        auto: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -191,88 +197,86 @@ class MockService : Service() {
         val transitionOrigin: DoubleArray? = realStart
 
         thread = Thread {
-
-            var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
-            when {
-                resumeRow >= 0    -> gen.seekToRow(resumeRow.coerceIn(0, gen.totalRows - 1))
-                skipFraction > 0.0 -> gen.seekToRow((skipFraction * gen.totalRows).toInt())
-            }
-            // Rata de injecție = tickHz (ca Lockito: la Hz=1 → 1 injecție/sec, 1000ms delay).
-            // Rate mari (12Hz+) către mai mulți provideri strică calculul de viteză al Bump
-            // (afișa 1 km/h) și par nenaturale → unlock-ul nu se declanșează. 1Hz = ca GPS real.
             val tickMs = 1000L / tickHz
             val metersPerTick = stepM     // un waypoint per tick → viteză = stepM*tickHz m/s
-            pointsDone = 0
-            var lastUiMs = 0L
+            pointsDone = 0; lastUiMs = 0L
+            var prev: DoubleArray? = transitionOrigin
 
-            // Tranziție lină de la ultima poziție (sau locația reală la prima rulare) spre traseu
-            val firstPt = gen.next()
-            var prev: DoubleArray? = if (firstPt != null) {
-                if (transitionOrigin != null) doTransition(transitionOrigin, firstPt, tickMs, speedKmh, metersPerTick)
-                firstPt
-            } else null
-
-            while (!stopFlag) {
-                val target = gen.next()
-                if (target == null) {
-                    if (loop) { gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked); continue }
-                    else { statusText = "GATA - zonă acoperită"; break }
-                }
-
-                // dacă saltul până la următorul punct e mai mare decât metersPerTick,
-                // îl spargem în pași intermediari ca să fie playback fluid
-                val from = prev ?: target
-                val dist = RouteGenerator.haversine(from, target)
-                val steps = max(1, ceil(dist / metersPerTick).toInt())
-                for (s in 1..steps) {
-                    if (stopFlag) break
-                    val t = s.toDouble() / steps
-                    val lat = from[0] + (target[0] - from[0]) * t
-                    val lon = from[1] + (target[1] - from[1]) * t
-                    pushLocation(lat, lon, speedKmh)
-                    curLat = lat; curLon = lon
-                    progress = gen.progress()
-                    curRow = gen.currentRow
-                    pointsDone++
-                    // Actualizăm UI/notificarea ~3×/sec, nu la fiecare injecție (rebuild-ul
-                    // notificării la 12+Hz cauza jank și încetinea bucla).
-                    val nowMs = SystemClock.elapsedRealtime()
-                    if (nowMs - lastUiMs >= 333) {
-                        lastUiMs = nowMs
-                        val ch = if (flpActive) "GPS+FUSED" else "GPS (fused eșuat)"
-                        statusText = "rulează • %.1f%% • %s".format(progress * 100, ch)
-                        updateNotif("%.1f%% • %d pct • %s".format(progress * 100, pointsDone, ch))
+            if (auto) {
+                // AUTO-EXTINDERE: spirală pătrată de blocuri din anchor (locația ta), cel-mai-aproape-
+                // întâi; fiecare bloc acoperit cu serpentină sărind deblocatele. Blocurile complet
+                // deblocate sunt trecute aproape instant. Rulează până la STOP.
+                val anchor = transitionOrigin ?: doubleArrayOf(IASI_LAT, IASI_LON)
+                val mLat = 111_320.0
+                val dLatB = AUTO_BLOCK_M / mLat
+                val dLonB = AUTO_BLOCK_M / (mLat * cos(Math.toRadians(anchor[0])))
+                var x = 0; var y = 0; var dx = 0; var dy = -1; var blockN = 0
+                while (!stopFlag && blockN < AUTO_MAX_BLOCKS) {
+                    val cLat = anchor[0] + y * dLatB; val cLon = anchor[1] + x * dLonB
+                    val bz = Zone.fromBbox(cLat - dLatB / 2, cLat + dLatB / 2, cLon - dLonB / 2, cLon + dLonB / 2)
+                    val g = RouteGenerator(bz, rowM, stepM, vertical, true)  // skip MEREU în auto
+                    var t = g.next()
+                    while (t != null && !stopFlag) {
+                        prev = drive(prev ?: t, t, tickMs, speedKmh, metersPerTick,
+                            "AUTO • bloc %d • %d pct".format(blockN, pointsDone))
+                        t = g.next()
                     }
-                    try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
+                    blockN++
+                    // avans spirală pătrată (blocuri consecutive adiacente)
+                    if (x == y || (x < 0 && x == -y) || (x > 0 && x == 1 - y)) { val n = -dy; dy = dx; dx = n }
+                    x += dx; y += dy
                 }
-                prev = target
+                statusText = "AUTO: oprit"
+            } else {
+                var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
+                when {
+                    resumeRow >= 0     -> gen.seekToRow(resumeRow.coerceIn(0, gen.totalRows - 1))
+                    skipFraction > 0.0 -> gen.seekToRow((skipFraction * gen.totalRows).toInt())
+                }
+                val firstPt = gen.next()
+                prev = if (firstPt != null) {
+                    if (transitionOrigin != null) drive(transitionOrigin, firstPt, tickMs, speedKmh, metersPerTick, "apropiere de zonă")
+                    firstPt
+                } else null
+                while (!stopFlag) {
+                    val target = gen.next()
+                    if (target == null) {
+                        if (loop) { gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked); continue }
+                        else { statusText = "GATA - zonă acoperită"; break }
+                    }
+                    curRow = gen.currentRow; progress = gen.progress()
+                    val ch = if (flpActive) "GPS" else "?"
+                    prev = drive(prev ?: target, target, tickMs, speedKmh, metersPerTick,
+                        "rulează • %.1f%% • %s".format(progress * 100, ch))
+                }
             }
-            // Oprire completă DOAR dacă am ieșit natural (traseu terminat), nu dacă am fost
-            // înlocuiți de un restart (care a setat stopFlag=true și face propriul teardown).
+            // Oprire completă DOAR dacă am ieșit natural, nu dacă am fost înlocuiți de un restart.
             if (!stopFlag) stopEverything()
         }
         thread?.start()
     }
 
     /**
-     * Apropiere CONTINUĂ de la `from` (locația reală curentă) la `to` (primul waypoint), la
-     * viteza configurată — pași de `metersPerTick` metri, exact ca în traseu. Așa Bump vede o
-     * "deplasare" fizică reală (nu un teleport "warped"), iar ultima locație acceptată de Bump
-     * urcă pas cu pas spre zonă în loc să rămână blocată acasă.
+     * Conduce CONTINUU de la `from` la `to` în pași de `metersPerTick` (interpolare), injectând
+     * fiecare punct și dormind `tickMs` între ele — așa Bump vede deplasare fizică reală (nu warp).
+     * Actualizează curLat/curLon/pointsDone și (throttled ~3×/s) notificarea. Returnează `to`.
+     * Folosit pentru TOT: tranziție inițială, pașii traseului, salturile între blocuri (auto).
      */
-    private fun doTransition(from: DoubleArray, to: DoubleArray, tickMs: Long,
-                             speedKmh: Double, metersPerTick: Double): DoubleArray {
+    private fun drive(from: DoubleArray, to: DoubleArray, tickMs: Long, speedKmh: Double,
+                      metersPerTick: Double, status: String): DoubleArray {
         val distM = RouteGenerator.haversine(from, to)
-        if (distM < metersPerTick) return to
         val steps = max(1, ceil(distM / metersPerTick).toInt())
         for (s in 1..steps) {
-            if (stopFlag) break
+            if (stopFlag) return to
             val t = s.toDouble() / steps
             val lat = from[0] + (to[0] - from[0]) * t
             val lon = from[1] + (to[1] - from[1]) * t
             pushLocation(lat, lon, speedKmh)
-            curLat = lat; curLon = lon
-            statusText = "apropiere de zonă… %.0f%%".format(t * 100)
+            curLat = lat; curLon = lon; pointsDone++
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs - lastUiMs >= 333) {
+                lastUiMs = nowMs; statusText = status; updateNotif(status)
+            }
             try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
         }
         return to

@@ -145,6 +145,12 @@
             android:text="🔓 Sari zonele deja deblocate"
             android:textSize="12sp" />
 
+        <Button android:id="@+id/btnAuto"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="🤖 AUTO — extinde din locație (acoperă tot)"
+            android:textSize="12sp"
+            android:paddingTop="2dp" android:paddingBottom="2dp" />
+
         <LinearLayout
             android:orientation="horizontal"
             android:layout_width="match_parent"
