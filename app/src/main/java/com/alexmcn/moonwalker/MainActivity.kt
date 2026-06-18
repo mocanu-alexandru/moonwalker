@@ -427,8 +427,19 @@ class MainActivity : AppCompatActivity() {
             estimateAndShow()
         }
         findViewById<Button>(R.id.btnStart).setOnClickListener { startService() }
-        findViewById<Button>(R.id.btnStop).setOnClickListener {
-            startService(Intent(this, MockService::class.java).apply { action = MockService.ACTION_STOP })
+        findViewById<Button>(R.id.btnStop).apply {
+            // apăsare scurtă = PAUZĂ (rămâi parcat pe loc); apăsare lungă = oprire completă (revii acasă)
+            setOnClickListener {
+                startService(Intent(this@MainActivity, MockService::class.java)
+                    .apply { action = MockService.ACTION_STOP })
+                toast("⏸ Parcat — START continuă de aici (ține apăsat = oprire completă)")
+            }
+            setOnLongClickListener {
+                startService(Intent(this@MainActivity, MockService::class.java)
+                    .apply { action = MockService.ACTION_RELEASE })
+                toast("■ Oprit complet — revii la GPS real")
+                true
+            }
         }
         findViewById<Button>(R.id.btnMock).setOnClickListener {
             startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
@@ -557,10 +568,13 @@ class MainActivity : AppCompatActivity() {
         ui.postDelayed(object : Runnable {
             override fun run() {
                 val running = MockService.running
+                val holding = MockService.holding
+                val active = running || holding   // parcat = tot mock activ (NU e locația reală)
                 if (running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                // Cât timp mock-ul NU rulează, getLastKnownLocation = locația reală → o reținem ca "acasă"
-                if (!running) {
+                // Doar când mock-ul e COMPLET oprit, getLastKnownLocation = locația reală → "acasă".
+                // Cât timp e parcat (holding), lm întoarce poziția mock → NU o lua drept acasă.
+                if (!active) {
                     try {
                         val real = lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
                             ?: lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
@@ -569,12 +583,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 val lat = MockService.curLat
                 val lon = MockService.curLon
-                status.text = if (running) {
-                    "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
+                status.text = when {
+                    running -> "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
                         MockService.statusText, lat, lon, MockService.pointsDone)
-                } else "○ ${MockService.statusText}"
+                    holding -> "⏸ parcat\nlat %.5f  lon %.5f".format(lat, lon)
+                    else    -> "○ ${MockService.statusText}"
+                }
 
-                if (running && lat != 0.0) {
+                if (active && lat != 0.0) {
                     if (curMarker == null) {
                         curMarker = Marker(map).apply {
                             icon = makeDotIcon()

@@ -88,6 +88,8 @@ class RouteGenerator(
     fun isFinished() = finished
     fun reset() { lineIndex = 0; colInLine = 0; finished = false; buildLine(0) }
     val totalRows: Int get() = nLines
+    /** Rândul curent (pt. salvare/reluare progres între opriri). */
+    val currentRow: Int get() = lineIndex
     fun seekToRow(n: Int) {
         lineIndex = n.coerceIn(0, nLines - 1)
         colInLine = 0; finished = false; buildLine(lineIndex)

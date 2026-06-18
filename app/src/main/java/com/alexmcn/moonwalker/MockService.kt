@@ -34,12 +34,17 @@ class MockService : Service() {
         const val EXTRA_VERTICAL = "vertical"; const val EXTRA_LOOP = "loop"
         const val EXTRA_SKIP_FRACTION = "skipFraction"
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
-        const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"
+        const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
+        const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
+
+        private const val PREFS = "mw_resume"
 
         // stare observabilă pentru UI
         @Volatile var running = false
+        @Volatile var holding = false     // true cât timp suntem „parcați" (pauză, fără mișcare)
         @Volatile var curLat = 0.0
         @Volatile var curLon = 0.0
+        @Volatile var curRow = 0          // rândul curent din serpentină (pt. reluare)
         @Volatile var progress = 0.0
         @Volatile var pointsDone = 0
         @Volatile var statusText = "oprit"
@@ -54,6 +59,10 @@ class MockService : Service() {
     @Volatile private var stopFlag = false
     private var prevLat = Double.NaN
     private var prevLon = Double.NaN
+    // Pauză-hold: thread care reinjectează ultima poziție ca să rămânem „parcați" (Bump nu revine acasă)
+    private var holdThread: Thread? = null
+    @Volatile private var holdStop = false
+    private var curPolyKey = ""          // poly-ul rulării curente (pt. a ști dacă reluăm același traseu)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -65,7 +74,8 @@ class MockService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) { stopEverything(); return START_NOT_STICKY }
+        if (intent?.action == ACTION_RELEASE) { stopEverything(); clearResume(); return START_NOT_STICKY }
+        if (intent?.action == ACTION_STOP) { pauseRoute(); return START_STICKY }
 
         val tickHz = (intent?.getIntExtra(EXTRA_TICK_HZ, 1) ?: 1).coerceIn(1, 100)
         val rowM = intent?.getDoubleExtra(EXTRA_ROW_M, 130.0) ?: 130.0
@@ -82,8 +92,10 @@ class MockService : Service() {
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
         // UI-ul trimite mereu EXTRA_POLY; lipsa lui = restart de sistem, nu start real.
         if (polyStr.isNullOrBlank()) {
-            if (!running) stopEverything()
-            return if (running) START_STICKY else START_NOT_STICKY
+            // restart sticky cu intent gol: dacă rulam → lăsăm sticky; dacă eram parcați (holding)
+            // → NU opri (rămânem parcați); altfel oprește complet.
+            if (!running && !holding) stopEverything()
+            return if (running || holding) START_STICKY else START_NOT_STICKY
         }
 
         val zone: Zone = if (polyStr != null && polyStr.isNotBlank()) {
@@ -108,23 +120,45 @@ class MockService : Service() {
             if (loc != null) doubleArrayOf(loc.latitude, loc.longitude) else null
         } catch (_: SecurityException) { null }
 
+        // RELUARE de unde am rămas (fără revenire acasă):
+        //  - origine = ultima poziție (dacă suntem parcați/rulăm, sau din prefs după restart proces)
+        //  - rând = progresul salvat, DOAR dacă reluăm același traseu (același poly)
+        var resumeOrigin: DoubleArray? = null
+        var resumeRow = -1
+        if ((running || holding) && (curLat != 0.0 || curLon != 0.0)) {
+            resumeOrigin = doubleArrayOf(curLat, curLon)
+            if (curPolyKey == polyStr) resumeRow = curRow
+        } else {
+            val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+            if (p.getBoolean("valid", false)) {
+                resumeOrigin = doubleArrayOf(
+                    Double.fromBits(p.getLong("lat", 0L)),
+                    Double.fromBits(p.getLong("lon", 0L)))
+                if (p.getString("key", "") == polyStr) resumeRow = p.getInt("row", 0)
+            }
+        }
+        curPolyKey = polyStr
+
         startForeground(NOTIF_ID, buildNotif("pornire..."))
-        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction, realStart, skipUnlocked)
+        startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
+            resumeOrigin ?: realStart, skipUnlocked, resumeRow)
         return START_STICKY
     }
 
     private fun startWalking(
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
-        realStart: DoubleArray? = null, skipUnlocked: Boolean = false
+        realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
         // vede stopFlag resetat la false și continuă cu setările vechi în paralel.
+        stopHold()
         stopPreviousRun()
 
         stopFlag = false
         running = true
+        holding = false
         val speedKmh = stepM * tickHz * 3.6
 
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
@@ -163,7 +197,10 @@ class MockService : Service() {
         thread = Thread {
 
             var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
-            if (skipFraction > 0.0) gen.seekToRow((skipFraction * gen.totalRows).toInt())
+            when {
+                resumeRow >= 0    -> gen.seekToRow(resumeRow.coerceIn(0, gen.totalRows - 1))
+                skipFraction > 0.0 -> gen.seekToRow((skipFraction * gen.totalRows).toInt())
+            }
             // Rata de injecție = tickHz (ca Lockito: la Hz=1 → 1 injecție/sec, 1000ms delay).
             // Rate mari (12Hz+) către mai mulți provideri strică calculul de viteză al Bump
             // (afișa 1 km/h) și par nenaturale → unlock-ul nu se declanșează. 1Hz = ca GPS real.
@@ -199,6 +236,7 @@ class MockService : Service() {
                     pushLocation(lat, lon, speedKmh)
                     curLat = lat; curLon = lon
                     progress = gen.progress()
+                    curRow = gen.currentRow
                     pointsDone++
                     // Actualizăm UI/notificarea ~3×/sec, nu la fiecare injecție (rebuild-ul
                     // notificării la 12+Hz cauza jank și încetinea bucla).
@@ -334,15 +372,71 @@ class MockService : Service() {
     private fun stopEverything() {
         stopFlag = true
         running = false
+        stopHold()
         prevLat = Double.NaN; prevLon = Double.NaN
         teardownMock(stopMockMode = true)
-        if (statusText.startsWith("rulează")) statusText = "oprit"
+        if (statusText.startsWith("rulează") || statusText.startsWith("⏸")) statusText = "oprit"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    /**
+     * PAUZĂ (butonul Stop): oprește mișcarea dar rămâne „parcat" pe ultima poziție — un thread de
+     * hold reinjectează aceeași locație prin FLP, deci Bump NU revine acasă. Reluarea continuă de aici.
+     */
+    private fun pauseRoute() {
+        if (!running && !holding) { stopEverything(); return }
+        stopFlag = true
+        thread?.interrupt()
+        try { thread?.join(3000) } catch (_: InterruptedException) {}
+        thread = null
+        running = false
+        persistResume()
+        startHold()
+    }
+
+    private fun startHold() {
+        if (curLat == 0.0 && curLon == 0.0) { stopEverything(); return }
+        stopHold()
+        holdStop = false
+        holding = true
+        statusText = "⏸ parcat"
+        updateNotif("⏸ parcat • apasă START ca să continui (long-press Stop = oprire completă)")
+        val lat = curLat; val lon = curLon
+        holdThread = Thread {
+            while (!holdStop) {
+                pushLocation(lat, lon, 0.0)   // staționar, viteză 0
+                try { Thread.sleep(1000) } catch (_: InterruptedException) {}
+            }
+        }.also { it.start() }
+    }
+
+    private fun stopHold() {
+        holdStop = true
+        holdThread?.interrupt()
+        try { holdThread?.join(2000) } catch (_: InterruptedException) {}
+        holdThread = null
+        holding = false
+    }
+
+    /** Salvează poziția + rândul curent ca să putem relua exact de aici (supraviețuiește repornirii procesului). */
+    private fun persistResume() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean("valid", true)
+            .putLong("lat", curLat.toRawBits())
+            .putLong("lon", curLon.toRawBits())
+            .putInt("row", curRow)
+            .putString("key", curPolyKey)
+            .apply()
+    }
+
+    private fun clearResume() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
+    }
+
     override fun onDestroy() {
         stopFlag = true
+        stopHold()
         teardownMock(stopMockMode = true)
         super.onDestroy()
     }
@@ -369,15 +463,19 @@ class MockService : Service() {
         (getSystemService(NotificationManager::class.java)).createNotificationChannel(ch)
     }
     private fun buildNotif(text: String): Notification {
-        val stopIntent = Intent(this, MockService::class.java).apply { action = ACTION_STOP }
-        val stopPi = PendingIntent.getService(this, 0, stopIntent,
+        val pausePi = PendingIntent.getService(this, 0,
+            Intent(this, MockService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val releasePi = PendingIntent.getService(this, 2,
+            Intent(this, MockService::class.java).apply { action = ACTION_RELEASE },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, CH_ID)
             .setContentTitle("Moonwalker rulează")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPi)
+            .addAction(android.R.drawable.ic_media_pause, "Pauză (parcat)", pausePi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop (acasă)", releasePi)
             .build()
     }
     private fun updateNotif(text: String) {
