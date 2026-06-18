@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Scope recomandat: LSPosed va sugera bifarea Bump pentru acest modul. -->
+    <string-array name="xposedscope">
+        <item>co.amo.android.location</item>
+    </string-array>
+</resources>

@@ -41,14 +41,18 @@ jobs:
         # Tag-ul TREBUIE să corespundă versionName-ului din APK ca auto-update-ul să pornească.
         run: echo "name=1.0.$(( $(git rev-list --count HEAD) + 58 ))" >> $GITHUB_OUTPUT
 
-      - name: Rename APK
-        run: mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/MoonWalker.apk
+      - name: Rename APKs
+        run: |
+          mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/MoonWalker.apk
+          mv xposedmock/build/outputs/apk/debug/xposedmock-debug.apk app/build/outputs/apk/debug/MWMockBypass.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MoonWalker
-          path: app/build/outputs/apk/debug/MoonWalker.apk
+          path: |
+            app/build/outputs/apk/debug/MoonWalker.apk
+            app/build/outputs/apk/debug/MWMockBypass.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -57,6 +61,8 @@ jobs:
           name: "Moonwalker v${{ steps.ver.outputs.name }}"
           prerelease: false
           make_latest: true
-          files: app/build/outputs/apk/debug/MoonWalker.apk
+          files: |
+            app/build/outputs/apk/debug/MoonWalker.apk
+            app/build/outputs/apk/debug/MWMockBypass.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
