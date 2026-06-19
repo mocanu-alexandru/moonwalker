@@ -35,6 +35,7 @@ class MockService : Service() {
         const val EXTRA_SKIP_FRACTION = "skipFraction"
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
+        const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
         private const val AUTO_BLOCK_M = 3000.0          // latura unui bloc de acoperire (3 km)
         private const val AUTO_INSET_M = 250.0           // margine ne-măsurată (celulele de graniță le acoperă blocul vecin)
         private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
@@ -42,6 +43,8 @@ class MockService : Service() {
         private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
         private const val INJECT_FAIL_LIMIT = 30         // injecții consecutive eșuate → re-adaugă providerii
         private const val DEAD_BACKOFF_MS = 60_000L      // pauză după „pipeline mort" înainte de reîncercare
+        private const val SEEK_MAX_PASSES = 4            // pasaje seek & destroy (re-scanare găuri) înainte de oprire
+        private const val SEEK_HITS = 3                  // câte fix-uri staționare „lovesc" fiecare gaură
         private const val IASI_LAT = 47.16; private const val IASI_LON = 27.58  // fallback anchor
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
@@ -102,8 +105,9 @@ class MockService : Service() {
         val skipFraction = intent?.getDoubleExtra(EXTRA_SKIP_FRACTION, 0.0) ?: 0.0
         val skipUnlocked = intent?.getBooleanExtra(EXTRA_SKIP_UNLOCKED, false) ?: false
         val auto = intent?.getBooleanExtra(EXTRA_AUTO, false) ?: false
-        // Auto sare MEREU deblocatele → are nevoie de mască. Asigură un set proaspăt înainte de rulare.
-        if ((skipUnlocked || auto) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
+        val seek = intent?.getBooleanExtra(EXTRA_SEEK, false) ?: false
+        // Auto/seek sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
+        if ((skipUnlocked || auto || seek) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
@@ -177,7 +181,7 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto)
+            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto, seek)
         return START_STICKY
     }
 
@@ -191,7 +195,7 @@ class MockService : Service() {
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
-        auto: Boolean = false
+        auto: Boolean = false, seek: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -242,7 +246,9 @@ class MockService : Service() {
             pointsDone = 0; lastUiMs = 0L
             var prev: DoubleArray? = transitionOrigin
 
-            if (auto) {
+            if (seek) {
+                runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
+            } else if (auto) {
                 // AUTO-EXTINDERE AUTONOMĂ + SELF-CHECK + AUTO-TUNING:
                 //  • spirală pătrată de blocuri (3 km) din anchor (locația ta / Iași), cel-mai-aproape-întâi,
                 //    LIMITATĂ la România (RomaniaGeo) — pornește de-acasă din Iași și acoperă toată țara;
@@ -408,6 +414,48 @@ class MockService : Service() {
             t = g.next()
         }
         return prev
+    }
+
+    /**
+     * SEEK & DESTROY: vânează hexagoanele singulare nedeblocate (găuri în interiorul acoperirii) și
+     * le deblochează, mergând fizic de la una la alta (fără warp), pe un traseu „mașină de tuns iarba".
+     * După fiecare pasaj RE-SCANEAZĂ (self-check): găurile deblocate dispar, cele ratate se reîncearcă.
+     * Se oprește când nu mai rămân găuri sau după SEEK_MAX_PASSES (ex. pipeline mort → găurile persistă).
+     */
+    private fun runSeekAndDestroy(prev0: DoubleArray?, tickMs: Long, speedKmh: Double, metersPerTick: Double) {
+        var prev = prev0
+        var pass = 0
+        while (!stopFlag && pass < SEEK_MAX_PASSES) {
+            renewWakelock()
+            statusText = "SEEK • scanez găuri..."; updateNotif(statusText)
+            UnlockedMask.refresh(applicationContext)
+            val holes = UnlockedMask.isolatedLockedHoles()
+            if (holes.isEmpty()) { statusText = "SEEK ✓ fără găuri rămase (pasaj $pass)"; break }
+            val ordered = orderLawnmower(holes)
+            val total = ordered.size
+            for ((idx, h) in ordered.withIndex()) {
+                if (stopFlag) break
+                if (idx % 16 == 0) renewWakelock()
+                prev = drive(prev ?: h, h, tickMs, speedKmh, metersPerTick,
+                    "🎯 SEEK • pasaj %d • %d/%d găuri".format(pass + 1, idx + 1, total))
+                // „lovește" celula: câteva fix-uri staționare pe centru ca Bump s-o înregistreze sigur
+                repeat(SEEK_HITS) {
+                    if (!stopFlag) { pushLocation(h[0], h[1], 0.0); try { Thread.sleep(tickMs) } catch (_: InterruptedException) {} }
+                }
+            }
+            pass++
+        }
+        if (!stopFlag && !statusText.startsWith("SEEK ✓")) statusText = "SEEK: oprit"
+    }
+
+    /** Ordonează găurile pe un traseu boustrophedon (benzi de latitudine, direcție alternantă). */
+    private fun orderLawnmower(holes: List<DoubleArray>): List<DoubleArray> {
+        if (holes.size <= 2) return holes
+        val binDeg = 0.02   // ~2.2 km lățime bandă
+        return holes.sortedWith(compareBy(
+            { floor(it[0] / binDeg).toInt() },
+            { if (floor(it[0] / binDeg).toInt() % 2 == 0) it[1] else -it[1] }
+        ))
     }
 
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {

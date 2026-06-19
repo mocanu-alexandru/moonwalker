@@ -128,6 +128,39 @@ object UnlockedMask {
         return n
     }
 
+    /**
+     * SEEK & DESTROY: hexagoanele „găuri" — celule NEDEBLOCATE înconjurate de celule deblocate
+     * (≥ minUnlockedNeighbors din 6 vecini deblocați) → hexagoane singulare ratate în interiorul
+     * teritoriului acoperit. Frontiera exterioară a acoperirii are <4 vecini deblocați → e exclusă
+     * automat (vrem doar găurile interne, nu marginea hărții).
+     *
+     * Algoritm: pt. fiecare celulă deblocată, vecinii ei care NU-s deblocați = candidați-gaură;
+     * apoi păstrăm candidatul dacă ≥ minUnlockedNeighbors din vecinii LUI sunt deblocați.
+     * Întoarce centrele [lat,lon]. Fail-safe: [] dacă H3/mask indisponibile.
+     */
+    fun isolatedLockedHoles(minUnlockedNeighbors: Int = 4): List<DoubleArray> {
+        val unlocked = cells ?: return emptyList()
+        val core = h3 ?: return emptyList()
+        // candidați: vecini nedeblocați ai celulelor deblocate (frontieră + găuri)
+        val candidates = HashSet<Long>()
+        for (c in unlocked) {
+            val ring = try { core.gridDisk(c, 1) } catch (_: Throwable) { continue }
+            for (n in ring) if (n != c && Arrays.binarySearch(unlocked, n) < 0) candidates.add(n)
+        }
+        // păstrează doar găurile interne (suficient de înconjurate de deblocat)
+        val out = ArrayList<DoubleArray>(candidates.size)
+        for (cand in candidates) {
+            val ring = try { core.gridDisk(cand, 1) } catch (_: Throwable) { continue }
+            var u = 0
+            for (n in ring) if (n != cand && Arrays.binarySearch(unlocked, n) >= 0) u++
+            if (u >= minUnlockedNeighbors) {
+                val ll = try { core.cellToLatLng(cand) } catch (_: Throwable) { continue }
+                out.add(doubleArrayOf(ll.lat, ll.lng))
+            }
+        }
+        return out
+    }
+
     /** Rulează o comandă prin `su -c`; null la eșec/lipsă root. */
     // -M / --mount-master: rulează în namespace-ul global de mount (procesul app are
     // propriul mount namespace în care datele altor appuri pot să nu fie vizibile).

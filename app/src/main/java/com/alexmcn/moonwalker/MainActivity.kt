@@ -419,7 +419,7 @@ class MainActivity : AppCompatActivity() {
         btnToggle.setOnClickListener {
             val show = controlPanel.visibility == View.GONE
             controlPanel.visibility = if (show) View.VISIBLE else View.GONE
-            btnToggle.text = if (show) "▼ ascunde" else "▲ arată controale"
+            btnToggle.text = if (show) "▴ ascunde avansat" else "▾ Avansat (mod manual)"
         }
         btnDirection.setOnCheckedChangeListener { _, checked ->
             isVertical = checked
@@ -450,6 +450,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
         findViewById<Button>(R.id.btnOptim).setOnClickListener { applyOptimalCoverage() }
         findViewById<Button>(R.id.btnAuto).setOnClickListener { startAuto() }
+        findViewById<Button>(R.id.btnSeek).setOnClickListener { startSeek() }
     }
 
     /**
@@ -528,6 +529,35 @@ class MainActivity : AppCompatActivity() {
         }
         startForegroundService(i)
         toast("🤖 AUTO pornit: acoper România din Iași • self-check + auto-tuning • STOP ca să oprești")
+    }
+
+    /**
+     * SEEK & DESTROY: vânează hexagoanele singulare NEDEBLOCATE (găurile rămase în interiorul
+     * teritoriului deja acoperit) și le deblochează una câte una, mergând fizic la fiecare. Re-scanează
+     * după fiecare pasaj (self-check) până nu mai rămân găuri. Necesită masca (root + Bump).
+     */
+    private fun startSeek() {
+        if (!UnlockedMask.isReady) {
+            toast("Masca nu e gata (root/Bump?) — fără ea nu pot găsi găurile"); return
+        }
+        val h = homeLocation
+        val poly = if (h != null)
+            "%.5f,%.5f;%.5f,%.5f;%.5f,%.5f".format(
+                h.latitude - 0.003, h.longitude - 0.003,
+                h.latitude + 0.003, h.longitude + 0.003,
+                h.latitude + 0.003, h.longitude - 0.003)
+        else "47.157,27.577;47.163,27.583;47.163,27.577"
+        val i = Intent(this, MockService::class.java).apply {
+            putExtra(MockService.EXTRA_TICK_HZ, 6)
+            putExtra(MockService.EXTRA_ROW_M, 75.0)
+            putExtra(MockService.EXTRA_STEP_M, 25.0)
+            putExtra(MockService.EXTRA_VERTICAL, false)
+            putExtra(MockService.EXTRA_LOOP, false)
+            putExtra(MockService.EXTRA_SEEK, true)
+            putExtra(MockService.EXTRA_POLY, poly)
+        }
+        startForegroundService(i)
+        toast("🎯 SEEK & DESTROY pornit: vânez găurile singulare • STOP ca să oprești")
     }
 
     private fun applyOptimalCoverage() {
