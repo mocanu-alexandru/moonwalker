@@ -36,7 +36,12 @@ class MockService : Service() {
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         private const val AUTO_BLOCK_M = 3000.0          // latura unui bloc de acoperire (3 km)
-        private const val AUTO_MAX_BLOCKS = 50000        // plafon de siguranță (rază ~670 km)
+        private const val AUTO_INSET_M = 250.0           // margine ne-măsurată (celulele de graniță le acoperă blocul vecin)
+        private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
+        private const val WAKELOCK_MS = 60 * 60 * 1000L  // timeout wakelock; reînnoit per bloc (renewWakelock)
+        private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
+        private const val INJECT_FAIL_LIMIT = 30         // injecții consecutive eșuate → re-adaugă providerii
+        private const val DEAD_BACKOFF_MS = 60_000L      // pauză după „pipeline mort" înainte de reîncercare
         private const val IASI_LAT = 47.16; private const val IASI_LON = 27.58  // fallback anchor
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
@@ -68,6 +73,10 @@ class MockService : Service() {
     @Volatile private var holdStop = false
     private var curPolyKey = ""          // poly-ul rulării curente (pt. a ști dacă reluăm același traseu)
     @Volatile private var lastUiMs = 0L  // throttling update notificare/status
+    @Volatile private var lastProgressMs = 0L   // ultima injecție reușită (watchdog stagnare)
+    @Volatile private var injectFails = 0       // injecții consecutive eșuate (self-heal provider)
+    private var watchdog: Thread? = null
+    @Volatile private var watchdogStop = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -79,7 +88,10 @@ class MockService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_RELEASE) { stopEverything(); clearResume(); return START_NOT_STICKY }
+        if (intent?.action == ACTION_RELEASE) {
+            AutoState.clear(applicationContext)   // oprire reală → nu mai reporni AUTO automat
+            stopEverything(); clearResume(); return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) { pauseRoute(); return START_STICKY }
 
         val tickHz = (intent?.getIntExtra(EXTRA_TICK_HZ, 1) ?: 1).coerceIn(1, 100)
@@ -97,18 +109,37 @@ class MockService : Service() {
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
         // UI-ul trimite mereu EXTRA_POLY; lipsa lui = restart de sistem, nu start real.
         if (polyStr.isNullOrBlank()) {
+            // AUTONOMIE: dacă AUTO era activ și nu rulăm acum (proces omorât/restart sticky),
+            // reia AUTO singur din parametrii persistați (spirala se reia de la frontieră, nu din Iași).
+            if (!running && !holding && AutoState.isActive(applicationContext)) {
+                val savedPoly = AutoState.poly(applicationContext)
+                if (!savedPoly.isNullOrBlank()) {
+                    val z = Zone.fromPolygon(parsePoly(savedPoly))
+                    curPolyKey = savedPoly
+                    // citește locația reală ca ancoră (înainte de addTestProvider) → spirala se reia corect
+                    val rs: DoubleArray? = try {
+                        val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                            ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                        if (loc != null) doubleArrayOf(loc.latitude, loc.longitude) else null
+                    } catch (_: SecurityException) { null }
+                    startForeground(NOTIF_ID, buildNotif("AUTO: reluare automată..."))
+                    startWalking(z, AutoState.tickHz(applicationContext), 75.0, 25.0,
+                        false, false, 0.0, rs, false, -1, auto = true)
+                    return START_STICKY
+                }
+            }
             // restart sticky cu intent gol: dacă rulam → lăsăm sticky; dacă eram parcați (holding)
             // → NU opri (rămânem parcați); altfel oprește complet.
             if (!running && !holding) stopEverything()
             return if (running || holding) START_STICKY else START_NOT_STICKY
         }
 
+        // AUTONOMIE: marchează AUTO ca activ + persistă parametrii ancoră → repornire automată
+        // după kill/reboot (onStartCommand sticky / BootReceiver).
+        if (auto && !polyStr.isNullOrBlank()) AutoState.setActive(applicationContext, polyStr, tickHz)
+
         val zone: Zone = if (polyStr != null && polyStr.isNotBlank()) {
-            val pts = polyStr.split(";").mapNotNull {
-                val a = it.split(","); if (a.size == 2)
-                    doubleArrayOf(a[0].toDouble(), a[1].toDouble()) else null
-            }
-            Zone.fromPolygon(pts)
+            Zone.fromPolygon(parsePoly(polyStr))
         } else {
             Zone.fromBbox(
                 intent?.getDoubleExtra(EXTRA_LAT_MIN, 0.0) ?: 0.0,
@@ -150,6 +181,12 @@ class MockService : Service() {
         return START_STICKY
     }
 
+    private fun parsePoly(poly: String): List<DoubleArray> =
+        poly.split(";").mapNotNull {
+            val a = it.split(","); if (a.size == 2)
+                doubleArrayOf(a[0].toDouble(), a[1].toDouble()) else null
+        }
+
     private fun startWalking(
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
@@ -167,9 +204,12 @@ class MockService : Service() {
         holding = false
         val speedKmh = stepM * tickHz * 3.6
 
+        // Non-reference-counted: fiecare acquire() doar RESETEAZĂ timeout-ul (renewWakelock() per
+        // bloc) → rulări de zile fără ca CPU să adoarmă, fără să stivuim acquire-uri.
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "moonwalker:injection")
-            .also { it.acquire(12 * 60 * 60 * 1000L) }  // max 12h
+            .apply { setReferenceCounted(false); acquire(WAKELOCK_MS) }
+        startWatchdog()
 
         // LOCKITO-PARITY — injecție prin LocationManager (GPS + network test providers), NU FLP.
         //   De ce NU FLP setMockMode/setMockLocation:
@@ -203,30 +243,102 @@ class MockService : Service() {
             var prev: DoubleArray? = transitionOrigin
 
             if (auto) {
-                // AUTO-EXTINDERE: spirală pătrată de blocuri din anchor (locația ta), cel-mai-aproape-
-                // întâi; fiecare bloc acoperit cu serpentină sărind deblocatele. Blocurile complet
-                // deblocate sunt trecute aproape instant. Rulează până la STOP.
+                // AUTO-EXTINDERE AUTONOMĂ + SELF-CHECK + AUTO-TUNING:
+                //  • spirală pătrată de blocuri (3 km) din anchor (locația ta / Iași), cel-mai-aproape-întâi,
+                //    LIMITATĂ la România (RomaniaGeo) — pornește de-acasă din Iași și acoperă toată țara;
+                //  • pt. fiecare bloc: măsoară ce e ÎNCĂ blocat (UnlockedMask) → acoperă → re-măsoară cât
+                //    a deblocat efectiv (ratio). Blocurile deja 100% deblocate se sar instant;
+                //  • SELF-CHECK: dacă ratio prea mic → REACOPERĂ blocul (mai dens/lent) = „se întoarce";
+                //  • AUTO-TUNING: CoverageController ajustează singur rowM/viteza ca să maximizeze
+                //    teritoriul/secundă păstrând acoperirea ≥ ~90%. Rulează până la STOP sau țară acoperită.
                 val anchor = transitionOrigin ?: doubleArrayOf(IASI_LAT, IASI_LON)
+                val ctrl = CoverageController(applicationContext, tickHz)
                 val mLat = 111_320.0
                 val dLatB = AUTO_BLOCK_M / mLat
                 val dLonB = AUTO_BLOCK_M / (mLat * cos(Math.toRadians(anchor[0])))
+                val maxRing = RomaniaGeo.maxRingBlocks(anchor[0], anchor[1], AUTO_BLOCK_M)
+                // O singură citire a măștii ÎNAINTE de buclă; după aceea doar acoperirea de blocuri
+                // schimbă setul deblocat, deci refresh-ul de DUPĂ fiecare bloc ține masca la zi.
+                // Blocurile sărite (deja deblocate / în afara RO) NU plătesc copierea DB (~ms vs 1-2s).
+                UnlockedMask.refresh(applicationContext)
+                // RELUARE spirală (autonomie): continuă de la FRONTIERĂ dacă ancora ≈ aceeași casă,
+                // nu de la Iași la fiecare repornire (reboot/kill/redeschidere) → fără re-parcurs.
                 var x = 0; var y = 0; var dx = 0; var dy = -1; var blockN = 0
-                while (!stopFlag && blockN < AUTO_MAX_BLOCKS) {
-                    val cLat = anchor[0] + y * dLatB; val cLon = anchor[1] + x * dLonB
-                    val bz = Zone.fromBbox(cLat - dLatB / 2, cLat + dLatB / 2, cLon - dLonB / 2, cLon + dLonB / 2)
-                    val g = RouteGenerator(bz, rowM, stepM, vertical, true)  // skip MEREU în auto
-                    var t = g.next()
-                    while (t != null && !stopFlag) {
-                        prev = drive(prev ?: t, t, tickMs, speedKmh, metersPerTick,
-                            "AUTO • bloc %d • %d pct".format(blockN, pointsDone))
-                        t = g.next()
+                AutoState.loadSpiral(applicationContext, anchor[0], anchor[1])?.let { s ->
+                    x = s[0]; y = s[1]; dx = s[2]; dy = s[3]; blockN = s[4]
+                }
+                while (!stopFlag) {
+                    if (max(abs(x), abs(y)) > maxRing) {
+                        statusText = "AUTO ✓ România acoperită (%d blocuri)".format(blockN)
+                        AutoState.clear(applicationContext)   // gata → nu mai reporni automat
+                        break
                     }
-                    blockN++
-                    // avans spirală pătrată (blocuri consecutive adiacente)
+                    val cLat = anchor[0] + y * dLatB; val cLon = anchor[1] + x * dLonB
+                    // avans spirală ACUM (înainte de orice `continue`) ca să nu buclăm la infinit
                     if (x == y || (x < 0 && x == -y) || (x > 0 && x == 1 - y)) { val n = -dy; dy = dx; dx = n }
                     x += dx; y += dy
+
+                    // sari blocurile complet în afara României (centru + 4 colțuri toate în afară)
+                    if (!RomaniaGeo.blockTouches(cLat, cLon, AUTO_BLOCK_M / 2, AUTO_BLOCK_M / 2)) continue
+                    blockN++
+                    renewWakelock()   // ține CPU treaz pe rulări de zile
+
+                    // WATCHDOG/robustețe: un bloc prost (H3, măsurare) NU trebuie să omoare toată rularea.
+                    try {
+                        // SELF-CHECK pas 1: ce e ÎNCĂ blocat în interiorul blocului (inset), ÎNAINTE de acoperire.
+                        // Folosim masca în memorie (împrospătată după blocul precedent) — fără copiere DB aici.
+                        val iLat = (AUTO_BLOCK_M / 2 - AUTO_INSET_M) / mLat
+                        val iLon = (AUTO_BLOCK_M / 2 - AUTO_INSET_M) / (mLat * cos(Math.toRadians(cLat)))
+                        val expected = UnlockedMask.lockedCellsInBbox(cLat - iLat, cLat + iLat, cLon - iLon, cLon + iLon)
+                        if (expected.isEmpty()) {
+                            statusText = "AUTO • bloc %d deja deblocat".format(blockN)
+                            AutoState.saveSpiral(applicationContext, anchor[0], anchor[1], x, y, dx, dy, blockN)
+                            continue
+                        }
+
+                        val bz = Zone.fromBbox(cLat - dLatB / 2, cLat + dLatB / 2, cLon - dLonB / 2, cLon + dLonB / 2)
+                        val p = ctrl.nextParams()
+                        prev = coverBlock(bz, p, prev,
+                            "AUTO • bloc %d • %.0fm/%.0fkm/h".format(blockN, p.rowM, p.speedKmh))
+
+                        // SELF-CHECK pas 2: re-măsoară acoperirea reală + lasă controllerul să se auto-acordeze.
+                        // Settle: Bump scrie footprint-ul cu mică întârziere → fără pauză am subnumăra → retry fals.
+                        try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                        if (!UnlockedMask.refresh(applicationContext)) {
+                            // TOLERANȚĂ: refresh eșuat (root hiccup) → fără măsurătoare validă NU adaptăm și
+                            // NU numărăm spre „pipeline mort"; mergem mai departe (fail-safe).
+                            statusText = "AUTO • bloc %d acoperit (măsurare indisponibilă)".format(blockN)
+                        } else {
+                            val oc = ctrl.record(expected.size, UnlockedMask.gainedAmong(expected))
+                            if (oc.dead) {
+                                // NU renunța (autonomie): alertă zgomotoasă + back-off + self-heal, apoi reia.
+                                statusText = "⚠ ${oc.status} — reîncerc în 60s"; updateNotif(statusText)
+                                reacquireProviders()
+                                try { Thread.sleep(DEAD_BACKOFF_MS) } catch (_: InterruptedException) {}
+                                UnlockedMask.refresh(applicationContext)
+                                ctrl.resetDead()
+                            } else if (oc.retry && !stopFlag) {
+                                // SELF-CHECK pas 3 „întoarce-te": prea puțin deblocat → REACOPERĂ dens/lent.
+                                val sp = ctrl.safeParams()
+                                prev = coverBlock(bz, sp, prev,
+                                    "AUTO • REIAU bloc %d (acop %.0f%%) • %.0fm/%.0fkm/h"
+                                        .format(blockN, oc.ratio * 100, sp.rowM, sp.speedKmh))
+                                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                                UnlockedMask.refresh(applicationContext)
+                                val g2 = UnlockedMask.gainedAmong(expected)
+                                statusText = "AUTO • bloc %d reluat → acop %.0f%%"
+                                    .format(blockN, g2 * 100.0 / expected.size)
+                            } else {
+                                statusText = "AUTO • bloc %d • %s".format(blockN, oc.status)
+                            }
+                        }
+                        AutoState.saveSpiral(applicationContext, anchor[0], anchor[1], x, y, dx, dy, blockN)
+                    } catch (e: Exception) {
+                        android.util.Log.w("MockService", "AUTO bloc $blockN eroare: ${e.message}")
+                    }
                 }
-                statusText = "AUTO: oprit"
+                if (!stopFlag && !statusText.startsWith("AUTO ✓") && !statusText.startsWith("⚠"))
+                    statusText = "AUTO: oprit"
             } else {
                 var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
                 when {
@@ -282,6 +394,22 @@ class MockService : Service() {
         return to
     }
 
+    /**
+     * Acoperă un bloc (serpentină, sărind MEREU deblocatele) cu setările `p` date de controller.
+     * Întoarce ultima poziție (pt. continuitate fizică spre blocul următor — fără teleport).
+     */
+    private fun coverBlock(bz: Zone, p: CoverageController.Params, prev0: DoubleArray?, status: String): DoubleArray? {
+        val tickMs = 1000L / p.tickHz
+        val g = RouteGenerator(bz, p.rowM, p.stepM, false, true)   // vertical=false, skipUnlocked=true
+        var prev = prev0
+        var t = g.next()
+        while (t != null && !stopFlag) {
+            prev = drive(prev ?: t, t, tickMs, p.speedKmh, p.stepM, status)
+            t = g.next()
+        }
+        return prev
+    }
+
     private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
@@ -298,9 +426,59 @@ class MockService : Service() {
         }
         // Injecție DOAR prin LocationManager test providers (Lockito-style). GMS fuzionează GPS-ul
         // în FLP fără rate-limit "too fast" → permite viteze mari (500+ km/h). FĂRĂ FLP setMockLocation.
+        var anyOk = false
         for (p in activeProviders) {
-            try { lm.setTestProviderLocation(p, fill(Location(p))) } catch (_: Exception) {}
+            try { lm.setTestProviderLocation(p, fill(Location(p))); anyOk = true } catch (_: Exception) {}
         }
+        // SELF-HEAL: dacă sistemul a scos test provider-ul (toate injecțiile pică), re-adaugă-l
+        // automat după un prag de eșecuri consecutive — fără asta botul „conduce" fără să injecteze.
+        if (anyOk || activeProviders.isEmpty()) {
+            injectFails = 0
+            lastProgressMs = SystemClock.elapsedRealtime()
+        } else {
+            if (++injectFails >= INJECT_FAIL_LIMIT) { injectFails = 0; reacquireProviders() }
+        }
+    }
+
+    /** Re-înregistrează test providerii (self-heal) dacă sistemul i-a scos în timpul rulării. */
+    private fun reacquireProviders() {
+        val want = if (activeProviders.isEmpty()) listOf(LocationManager.GPS_PROVIDER) else activeProviders.toList()
+        for (p in want) { try { addMockProvider(p); if (p !in activeProviders) activeProviders.add(p) } catch (_: Exception) {} }
+    }
+
+    /** Reînnoiește wakelock-ul (resetează timeout-ul) — pt. rulări de zile fără adormirea CPU. */
+    private fun renewWakelock() {
+        try { wakeLock?.acquire(WAKELOCK_MS) } catch (_: Exception) {}
+    }
+
+    /**
+     * Watchdog: dacă progresul (pointsDone via lastProgressMs) stagnează cât rulăm (nu parcați),
+     * cea mai probabilă cauză e pierderea test provider-ului → forțează self-heal (re-adaugă) +
+     * reînnoiește wakelock-ul. Un singur thread ușor, verifică la 30s. Nu omoară thread-ul de
+     * injecție (riscant); doar repară cauza, iar acesta reia singur.
+     */
+    private fun startWatchdog() {
+        stopWatchdog()
+        watchdogStop = false
+        lastProgressMs = SystemClock.elapsedRealtime()
+        watchdog = Thread {
+            while (!watchdogStop) {
+                try { Thread.sleep(30_000) } catch (_: InterruptedException) { break }
+                if (watchdogStop || !running || holding) continue
+                val idle = SystemClock.elapsedRealtime() - lastProgressMs
+                if (idle > STALL_MS) {
+                    reacquireProviders()
+                    renewWakelock()
+                    lastProgressMs = SystemClock.elapsedRealtime()  // dă-i o nouă fereastră
+                }
+            }
+        }.also { it.start() }
+    }
+
+    private fun stopWatchdog() {
+        watchdogStop = true
+        watchdog?.interrupt()
+        watchdog = null
     }
 
     /**
@@ -309,6 +487,7 @@ class MockService : Service() {
      * off→on inutil (race). `stopMockMode=true` la oprire reală.
      */
     private fun teardownMock(stopMockMode: Boolean) {
+        stopWatchdog()
         wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
         if (stopMockMode) {
             flpActive = false

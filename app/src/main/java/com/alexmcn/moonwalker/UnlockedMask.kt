@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import com.uber.h3core.H3Core
+import com.uber.h3core.util.LatLng
 import java.io.File
 import java.util.Arrays
 
@@ -90,6 +91,41 @@ object UnlockedMask {
         val core = h3 ?: return false
         val cell = try { core.latLngToCell(lat, lon, RES) } catch (_: Throwable) { return false }
         return Arrays.binarySearch(c, cell) >= 0
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // SELF-CHECK: măsurarea acoperirii reale per bloc (cât a deblocat efectiv botul).
+    // Folosit de CoverageController pentru retry + auto-tuning. Toate fail-safe (set gol
+    // / 0 la orice eroare → controllerul tratează blocul ca „fără eșantion", nu adaptează greșit).
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Celulele H3 res-10 din bbox care sunt ÎNCĂ blocate (nu apar în setul deblocat curent).
+     * = celulele pe care ne AȘTEPTĂM să le deblocăm acoperind acest bloc.
+     * Se cheamă ÎNAINTE de acoperire (vs. setul curent). Întoarce [] dacă H3 indisponibil.
+     */
+    fun lockedCellsInBbox(latMin: Double, latMax: Double, lonMin: Double, lonMax: Double): LongArray {
+        val core = h3 ?: return LongArray(0)
+        val ring = listOf(
+            LatLng(latMin, lonMin), LatLng(latMin, lonMax),
+            LatLng(latMax, lonMax), LatLng(latMax, lonMin)
+        )
+        val all = try { core.polygonToCells(ring, emptyList(), RES) } catch (_: Throwable) { return LongArray(0) }
+        val locked = cells ?: return all.toLongArray()   // nimic deblocat încă → toate sunt „expected"
+        val out = ArrayList<Long>(all.size)
+        for (c in all) if (Arrays.binarySearch(locked, c) < 0) out.add(c)
+        return out.toLongArray()
+    }
+
+    /**
+     * Câte din `expected` (celule blocate înainte de acoperire) apar ACUM în setul deblocat.
+     * Se cheamă DUPĂ acoperire + refresh(). ratio = gainedAmong/expected.size = acoperirea reală.
+     */
+    fun gainedAmong(expected: LongArray): Int {
+        val locked = cells ?: return 0
+        var n = 0
+        for (c in expected) if (Arrays.binarySearch(locked, c) >= 0) n++
+        return n
     }
 
     /** Rulează o comandă prin `su -c`; null la eșec/lipsă root. */

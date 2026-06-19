@@ -496,13 +496,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * AUTO-extindere: pornește acoperirea automată în spirală din locația curentă, spre exterior
-     * (cel-mai-aproape-întâi), sărind zonele deblocate, la ~497 km/h, fără să mai selectezi zone.
-     * Necesită masca (root + Bump). Rulează până la STOP. Ține telefonul în split-screen cu Bump pe hartă.
+     * AUTO-extindere AUTONOMĂ: acoperă toată ROMÂNIA în spirală din locația ta (Iași), cel-mai-aproape-
+     * întâi, sărind zonele deblocate. ÎNVAȚĂ singur: după fiecare bloc verifică în Bump cât a deblocat
+     * efectiv (self-check) și își ajustează singur distanța dintre rânduri / viteza ca să meargă cât mai
+     * eficient păstrând acoperirea ~90% (CoverageController). Dacă un bloc deblochează prea puțin → se
+     * întoarce și-l reia mai dens. Pornește de la setul tău „soft spot" (6 inj/s) și se optimizează de-acolo.
+     * Necesită masca (root + Bump). Rulează până la STOP. Nu necesită nicio intervenție.
      */
     private fun startAuto() {
         if (!UnlockedMask.isReady) {
-            toast("Masca nu e gata (root/Bump?) — fără ea nu pot sări deblocatele"); return
+            toast("Masca nu e gata (root/Bump?) — fără ea nu pot măsura/sări deblocatele"); return
         }
         // poly „ancoră" doar ca să treacă verificarea din service; auto folosește locația reală.
         val h = homeLocation
@@ -513,16 +516,18 @@ class MainActivity : AppCompatActivity() {
                 h.latitude + 0.003, h.longitude - 0.003)
         else "47.157,27.577;47.163,27.583;47.163,27.577"
         val i = Intent(this, MockService::class.java).apply {
-            putExtra(MockService.EXTRA_TICK_HZ, 3)         // 3 × 46m = 138 m/s ≈ 497 km/h
-            putExtra(MockService.EXTRA_ROW_M, 90.0)
-            putExtra(MockService.EXTRA_STEP_M, 46.0)
+            // cadența de injecție (Hz) e fixă în auto — controllerul reglează rowM & pasul (viteza).
+            // Pornim de la „soft spot": 6 inj/s, rânduri 75m, pas 25m (≈540 km/h) — apoi auto-tuning.
+            putExtra(MockService.EXTRA_TICK_HZ, 6)
+            putExtra(MockService.EXTRA_ROW_M, 75.0)
+            putExtra(MockService.EXTRA_STEP_M, 25.0)
             putExtra(MockService.EXTRA_VERTICAL, false)
             putExtra(MockService.EXTRA_LOOP, false)
             putExtra(MockService.EXTRA_AUTO, true)
             putExtra(MockService.EXTRA_POLY, poly)
         }
         startForegroundService(i)
-        toast("🤖 AUTO pornit: extindere din locația ta • ~497 km/h • sare deblocatele • STOP ca să oprești")
+        toast("🤖 AUTO pornit: acoper România din Iași • self-check + auto-tuning • STOP ca să oprești")
     }
 
     private fun applyOptimalCoverage() {
