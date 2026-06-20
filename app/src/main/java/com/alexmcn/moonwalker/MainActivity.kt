@@ -44,6 +44,8 @@ class MainActivity : AppCompatActivity() {
         // Pornire automată O SINGURĂ DATĂ pe viața procesului (process-scoped, NU instance): rotația /
         // config-change reface onCreate, dar dacă userul a oprit, NU repornim. La relansare proces = fresh.
         @Volatile private var autoStarted = false
+        // La fel, verificările de setup (update + mock location) o singură dată per proces.
+        @Volatile private var setupChecked = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +64,7 @@ class MainActivity : AppCompatActivity() {
         requestPerms()
         pollStatus()
         showVersion()
-        ui.postDelayed({ UpdateManager.checkAndInstall(this, silent = true) }, 3000)
+        verifySetupAtStartup()   // update + mock-location verificate o dată la pornire (ca Lockito)
 
         // Citește masca (root + Bump) pe thread separat; la succes pornește AUTO automat.
         refreshMaskThenAutoStart()
@@ -97,13 +99,26 @@ class MainActivity : AppCompatActivity() {
             toast("■ Oprit complet — revii la GPS real")
             true
         }
-        findViewById<Button>(R.id.btnMock).setOnClickListener {
-            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
-        }
-        findViewById<Button>(R.id.btnUpdate).setOnClickListener {
-            UpdateManager.checkAndInstall(this)
-        }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
+    }
+
+    /**
+     * Verificări O SINGURĂ DATĂ la pornirea aplicației (ca Lockito) — fără butoane permanente:
+     *  • UPDATE: verifică/instalează în fundal la pornire (silent — fără toast dacă e la zi);
+     *  • MOCK LOCATION: dacă Moonwalker nu e setat ca aplicație Mock Location, deschide Developer
+     *    Options o dată ca să-l activezi. După setare, la următoarea pornire nu mai deschide nimic.
+     * Process-scoped (setupChecked) → rotația/config-change NU re-declanșează.
+     */
+    private fun verifySetupAtStartup() {
+        if (setupChecked) return
+        setupChecked = true
+        ui.postDelayed({ UpdateManager.checkAndInstall(this, silent = true) }, 3000)
+        if (!isMockLocationEnabled()) {
+            toast("Activează Moonwalker ca aplicație Mock Location (Developer Options)")
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+            } catch (_: Exception) {}
+        }
     }
 
     // ── Mască deblocate + pornire automată ────────────────────────────────────

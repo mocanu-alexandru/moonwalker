@@ -61,6 +61,31 @@ object AutoState {
         )
     }
 
+    /**
+     * Ancora spiralei salvată (≈ „acasă"), independent de GPS. Preferată la RESUME/RESTART în locul
+     * unei citiri `getLastKnownLocation` care, după teardown-ul mock-ului, poate întoarce încă ultima
+     * poziție MOCK (frontiera) → dacă e >4km de ancoră, spirala s-ar re-centra pe locul blocat. Cu
+     * ancora salvată, `loadSpiral` se potrivește mereu (distanță 0) → reia frontiera garantat.
+     */
+    fun anchor(ctx: Context): DoubleArray? {
+        val p = ctx.prefs()
+        if (!p.contains("aLat")) return null
+        return doubleArrayOf(Double.fromBits(p.getLong("aLat", 0L)), Double.fromBits(p.getLong("aLon", 0L)))
+    }
+
+    /**
+     * Loop-guard pt. watcher-ul „blocat": numără restart-urile consecutive la ACELAȘI bloc. Dacă
+     * blocul a avansat de la ultimul restart → streak=1 (progres, totul ok); altfel incrementează.
+     * Caller-ul oprește hammeringul când streak-ul devine mare. Resetat de clear() (RELEASE/țară gata).
+     */
+    fun noteRestart(ctx: Context, blockN: Int): Int {
+        val p = ctx.prefs()
+        val lastBlk = p.getInt("rsBlk", -1)
+        val streak = if (blockN == lastBlk) p.getInt("rsStreak", 0) + 1 else 1
+        p.edit().putInt("rsBlk", blockN).putInt("rsStreak", streak).apply()
+        return streak
+    }
+
     private fun Context.prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun haversine(la1: Double, lo1: Double, la2: Double, lo2: Double): Double {

@@ -60,25 +60,6 @@
         android:paddingTop="10dp"
         android:paddingBottom="10dp" />
 
-    <!-- Setup: developer options (mock location) + update (mic) -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-        <Button android:id="@+id/btnMock"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="Developer Options"
-            android:textSize="11sp"
-            style="?attr/borderlessButtonStyle" />
-        <Button android:id="@+id/btnUpdate"
-            android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="Verifică update"
-            android:textSize="11sp"
-            style="?attr/borderlessButtonStyle" />
-    </LinearLayout>
-
     <TextView
         android:id="@+id/versionTv"
         android:layout_width="match_parent"

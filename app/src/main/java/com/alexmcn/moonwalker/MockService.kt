@@ -46,6 +46,9 @@ class MockService : Service() {
         private const val SEEK_MAX_PASSES = 4            // pasaje seek & destroy (re-scanare găuri) înainte de oprire
         private const val SEEK_HITS = 3                  // câte fix-uri staționare „lovesc" fiecare gaură
         private const val CLEANUP_MAX_PASSES = 3         // pasaje „garanție 100%" per bloc (țintire directă a celulelor rămase)
+        private const val STUCK_MS = 8 * 60_000L         // poziția nu iese din raza STUCK_RADIUS atâta timp → „blocat" → restart
+        private const val STUCK_RADIUS_M = 250.0         // sub atâta deplasare = considerat pe loc (sub o latură de bloc)
+        private const val RESTART_MAX_STREAK = 3         // restart-uri consecutive la același bloc → nu mai hamerui (back-off + alertă)
         private const val IASI_LAT = 47.16; private const val IASI_LON = 27.58  // fallback anchor
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
@@ -81,6 +84,10 @@ class MockService : Service() {
     @Volatile private var injectFails = 0       // injecții consecutive eșuate (self-heal provider)
     private var watchdog: Thread? = null
     @Volatile private var watchdogStop = false
+    // Watcher „blocat într-o zonă": ultima dată când poziția chiar a ieșit din rază + punctul de referință.
+    @Volatile private var lastMoveMs = 0L
+    private var wpLat = Double.NaN; private var wpLon = Double.NaN
+    @Volatile private var autoBlockN = 0   // blocul curent din spirală (pt. loop-guard-ul restart-ului)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -121,8 +128,11 @@ class MockService : Service() {
                 if (!savedPoly.isNullOrBlank()) {
                     val z = Zone.fromPolygon(parsePoly(savedPoly))
                     curPolyKey = savedPoly
-                    // citește locația reală ca ancoră (înainte de addTestProvider) → spirala se reia corect
-                    val rs: DoubleArray? = try {
+                    // ANCORĂ la RESUME/RESTART: preferă ancora SALVATĂ (≈ acasă), NU getLastKnownLocation —
+                    // după teardown-ul mock-ului last-known poate fi încă poziția MOCK (frontiera); dacă e
+                    // >4km de ancoră, loadSpiral n-ar potrivi → spirala s-ar re-centra pe locul blocat.
+                    // Cu ancora salvată, loadSpiral se potrivește mereu → reia frontiera. GPS doar ca fallback.
+                    val rs: DoubleArray? = AutoState.anchor(applicationContext) ?: try {
                         val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
                             ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
                         if (loc != null) doubleArrayOf(loc.latitude, loc.longitude) else null
@@ -276,6 +286,10 @@ class MockService : Service() {
                 AutoState.loadSpiral(applicationContext, anchor[0], anchor[1])?.let { s ->
                     x = s[0]; y = s[1]; dx = s[2]; dy = s[3]; blockN = s[4]
                 }
+                autoBlockN = blockN   // expune blocul curent pt. watcher-ul „blocat" / loop-guard restart
+                // Persistă ancora IMEDIAT (≈ acasă) → AutoState.anchor() e proaspătă din start, deci un
+                // restart precoce (blocat în primul bloc) reia frontiera corect, nu re-centrează.
+                AutoState.saveSpiral(applicationContext, anchor[0], anchor[1], x, y, dx, dy, blockN)
                 // FAZA 1 — CURĂȚĂ GĂURILE APROPIATE: la START PROASPĂT (blockN==0, nu pe reluare
                 // mid-spirală), du-te întâi la cel mai apropiat hexagon nedeblocat de poziția curentă
                 // și continuă nearest-first (seek) până nu mai rămân găuri singulare. Abia apoi spirala.
@@ -297,7 +311,7 @@ class MockService : Service() {
 
                     // sari blocurile complet în afara României (centru + 4 colțuri toate în afară)
                     if (!RomaniaGeo.blockTouches(cLat, cLon, AUTO_BLOCK_M / 2, AUTO_BLOCK_M / 2)) continue
-                    blockN++
+                    blockN++; autoBlockN = blockN
                     renewWakelock()   // ține CPU treaz pe rulări de zile
 
                     // WATCHDOG/robustețe: un bloc prost (H3, măsurare) NU trebuie să omoare toată rularea.
@@ -604,19 +618,56 @@ class MockService : Service() {
     private fun startWatchdog() {
         stopWatchdog()
         watchdogStop = false
-        lastProgressMs = SystemClock.elapsedRealtime()
+        val now0 = SystemClock.elapsedRealtime()
+        lastProgressMs = now0; lastMoveMs = now0
+        wpLat = Double.NaN; wpLon = Double.NaN
         watchdog = Thread {
             while (!watchdogStop) {
                 try { Thread.sleep(30_000) } catch (_: InterruptedException) { break }
                 if (watchdogStop || !running || holding) continue
-                val idle = SystemClock.elapsedRealtime() - lastProgressMs
-                if (idle > STALL_MS) {
-                    reacquireProviders()
-                    renewWakelock()
-                    lastProgressMs = SystemClock.elapsedRealtime()  // dă-i o nouă fereastră
+                val nowMs = SystemClock.elapsedRealtime()
+                // (1) STALL injecție: providerul pierdut (nicio injecție reușită) → self-heal pe loc.
+                if (nowMs - lastProgressMs > STALL_MS) {
+                    reacquireProviders(); renewWakelock()
+                    lastProgressMs = nowMs
+                }
+                // (2) BLOCAT ÎN ZONĂ: injectează, dar poziția nu iese din rază de mult timp (thread agățat,
+                // lovituri staționare la nesfârșit etc.) → restart AUTO (doar în mod autonom).
+                val lat = curLat; val lon = curLon
+                if (lat != 0.0 || lon != 0.0) {
+                    if (wpLat.isNaN() ||
+                        RouteGenerator.haversine(doubleArrayOf(wpLat, wpLon), doubleArrayOf(lat, lon)) > STUCK_RADIUS_M) {
+                        wpLat = lat; wpLon = lon; lastMoveMs = nowMs   // s-a mișcat real → resetează fereastra
+                    } else if (AutoState.isActive(applicationContext) && nowMs - lastMoveMs > STUCK_MS) {
+                        if (forceRestart()) break                      // a programat restartul → ieși din watchdog
+                        wpLat = lat; wpLon = lon; lastMoveMs = nowMs   // back-off → mai dă-i o fereastră
+                    }
                 }
             }
         }.also { it.start() }
+    }
+
+    /**
+     * Watcher „blocat": repornește serviciul AUTO (resume din AutoState cu ancora SALVATĂ → reia
+     * frontiera, nu re-centrează). Loop-guard: dacă restartăm de RESTART_MAX_STREAK ori la ACELAȘI bloc
+     * fără progres → nu mai hamerui, alertă sticky + back-off (lasă bucla să mai încerce singură).
+     * Întoarce true dacă a programat restartul (caller iese din watchdog), false la back-off.
+     */
+    private fun forceRestart(): Boolean {
+        val streak = AutoState.noteRestart(applicationContext, autoBlockN)
+        if (streak >= RESTART_MAX_STREAK) {
+            statusText = "⚠ blocat repetat la blocul $autoBlockN — back-off (verifică pipeline)"; updateNotif(statusText)
+            return false
+        }
+        statusText = "⚠ pare blocat — restart automat (#$streak)"; updateNotif(statusText)
+        // intent gol → la repornire onStartCommand reia AUTO din AutoState (ancoră salvată = acasă).
+        val restart = PendingIntent.getService(this, 7,
+            Intent(applicationContext, MockService::class.java),
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
+        (getSystemService(ALARM_SERVICE) as android.app.AlarmManager)
+            .set(android.app.AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 2000L, restart)
+        stopEverything()
+        return true
     }
 
     private fun stopWatchdog() {
