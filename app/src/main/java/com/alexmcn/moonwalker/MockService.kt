@@ -36,8 +36,6 @@ class MockService : Service() {
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
-        private const val CONNECTOR_KMH = 1080.0         // viteza CONECTORilor (peste goluri deblocate / arce non-poligon)
-        private const val CONNECTOR_MIN_M = 200.0        // salt peste atâta → tratat ca CONECTOR rapid, nu acoperire lentă
         private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
         private const val WAKELOCK_MS = 60 * 60 * 1000L  // timeout wakelock; reînnoit per bloc (renewWakelock)
         private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
@@ -406,15 +404,24 @@ class MockService : Service() {
 
     /**
      * Ordonează județele nearest-first din origine (greedy pe centroizi, distanță planară ieftină).
-     * Determinist (origine + listă fixă) → reluarea pe index e validă. N ≈ 42 → O(N²) neglijabil.
+     * Județul care CONȚINE originea e forțat PRIMUL (acolo blast-radius pornește din punctul tău GPS,
+     * centrat pe GPS — vezi runAutoCounties; altfel originea ar cădea în afara primului județ și ar
+     * genera conectori inutili). Determinist (origine + listă fixă) → reluarea pe index e validă.
      */
     private fun orderCountiesNearestFirst(origin: DoubleArray): List<String> {
         val cents = LinkedHashMap<String, DoubleArray>()
-        for (n in Counties.names()) Counties.polygon(n)?.let { if (it.isNotEmpty()) cents[n] = centroid(it) }
+        var home: String? = null
+        for (n in Counties.names()) Counties.polygon(n)?.let { poly ->
+            if (poly.isNotEmpty()) {
+                cents[n] = centroid(poly)
+                if (home == null && Zone.fromPolygon(poly).contains(origin[0], origin[1])) home = n
+            }
+        }
         val remaining = ArrayList(cents.keys)
         val out = ArrayList<String>(remaining.size)
         var cur = origin
         val kLon = cos(Math.toRadians(origin[0]))
+        home?.let { remaining.remove(it); out.add(it); cur = cents[it]!! }   // județul de acasă primul
         while (remaining.isNotEmpty()) {
             var bestI = 0; var bestD = Double.MAX_VALUE
             for (i in remaining.indices) {
@@ -437,8 +444,13 @@ class MockService : Service() {
 
     /**
      * Acoperă o zonă (județ) cu pattern-ul BLAST RADIUS — pătrate concentrice din `center`, clipate la
-     * poligon, sărind deblocatele (RingSpiralGenerator). Conectorii peste goluri (deblocat / arce
-     * non-poligon) sunt conduși rapid (driveAdaptive). Întoarce ultima poziție (continuitate fizică).
+     * poligon, sărind deblocatele (RingSpiralGenerator). Întoarce ultima poziție (continuitate fizică).
+     *
+     * TOT (inclusiv salturile peste goluri deblocate / arce non-poligon) e condus la `p.speedKmh` =
+     * viteza de acoperire pe care TUNER-ul a găsit-o sigură (acceptată de Bump). NU mai folosim o viteză
+     * de conector fixă mai mare: ea ocolea limita tuner-ului → peste poarta Bump → poziții respinse ca
+     * „warp" → 0 deblocări + poziție săltăreață. `drive` interpolează la stepM, deci golurile rămân
+     * traversate continuu (fără teleport), doar la viteza sigură.
      */
     private fun coverRings(zone: Zone, cLat: Double, cLon: Double, p: CoverageController.Params,
                            prev0: DoubleArray?, status: String): DoubleArray? {
@@ -449,26 +461,10 @@ class MockService : Service() {
         var pt = g.next()
         while (pt != null && !stopFlag) {
             if (i++ % 64 == 0) renewWakelock()
-            prev = driveAdaptive(prev, pt, tickMs, p, status)
+            prev = drive(prev ?: pt, pt, tickMs, p.speedKmh, p.stepM, status)
             pt = g.next()
         }
         return prev
-    }
-
-    /**
-     * Ca `drive`, dar dacă saltul spre `pt` e mult mai mare decât pasul (gol de teritoriu deblocat /
-     * arc în afara poligonului), îl parcurge la viteza de CONECTOR: ACEEAȘI rezoluție spațială (stepM,
-     * deci Bump vede aceeași cale densă, fără „warp"), doar cu pauză mai mică între pași → mult mai
-     * repede pe ceas. Evită re-conducerea deblocatului la viteza lentă de acoperire (câștig spre final).
-     */
-    private fun driveAdaptive(prev: DoubleArray?, pt: DoubleArray, tickMs: Long,
-                              p: CoverageController.Params, status: String): DoubleArray {
-        val from = prev ?: pt
-        if (RouteGenerator.haversine(from, pt) > CONNECTOR_MIN_M) {
-            val cTickMs = max(1L, (p.stepM / (CONNECTOR_KMH / 3.6) * 1000.0).toLong())
-            return drive(from, pt, cTickMs, CONNECTOR_KMH, p.stepM, status)
-        }
-        return drive(from, pt, tickMs, p.speedKmh, p.stepM, status)
     }
 
     /**
