@@ -8,17 +8,20 @@ import android.content.Context
  * deblocare măsurat după fiecare bloc (CoverageController nu vede GPS, vede doar cât a
  * deblocat efectiv botul: ratio = celule_deblocate / celule_așteptate).
  *
- * OBIECTIV: maximizează rata de acoperire (area rate = viteză × rowM, m²/s) — adică teritoriu
- * pe secundă — CU CONDIȚIA ca acoperirea reală să rămână ≥ TARGET (~90%). Rânduri mai late și
- * viteză mai mare = mai eficient, dar dacă sar hexagoane → ratio scade → dă înapoi.
+ * OBIECTIV: acoperire COMPLETĂ DINTR-O SINGURĂ TRECERE — maximizează rata de acoperire (area rate =
+ * viteză × rowM, m²/s) CU CONDIȚIA ca pasajul rapid singur să prindă ~TOATE hexagoanele (ratio ≥
+ * TARGET ~98%). Adică: găsește cele mai LARGI rânduri / cel mai mare pas care încă NU lasă găuri.
+ * Așa cleanup-ul „garanție 100%" din MockService devine o plasă de siguranță aproape goală — botul
+ * nu mai trebuie „să se întoarcă". Cu cât lasă mai multe hexagoane nedescoperite, cu atât se
+ * îndesește mai agresiv (pull ∝ deficit) ca să le prindă pe toate la trecerea următoare.
  *
  * METODĂ: hill-climbing pe coordonate (probează alternativ rowM apoi stepM). Fiecare bloc e
- * un „probe": crește un knob, acoperă, măsoară. Dacă ratio se ține → acceptă (baza urcă, knob mai
- * agresiv). Dacă ratio scade → respinge (knob sub bază, probe mai mic). Bazele bune se persistă,
- * deci botul pornește data viitoare de unde a învățat.
+ * un „probe": crește un knob, acoperă, măsoară. Dacă ratio se ține ≥ TARGET → acceptă (baza urcă,
+ * knob mai agresiv). Dacă ratio scade → respinge și TRAGE ÎNAPOI (mai dens) proporțional cu câte
+ * hexagoane a ratat. Bazele bune se persistă, deci botul pornește data viitoare de unde a învățat.
  *
- * SELF-CHECK: `record()` întoarce și `retry=true` dacă blocul curent a deblocat prea puțin →
- * MockService reacoperă blocul (mai lent/dens). DEAD: dacă N blocuri la rând deblochează ZERO
+ * SEMNAL: `record()` primește acoperirea REALĂ a pasajului RAPID (înainte de cleanup) → învață pe
+ * acoperirea de-o-trecere, nu pe 100%-ul post-cleanup. DEAD: dacă N blocuri la rând deblochează ZERO
  * deși aveau celule de deblocat → pipeline-ul de injecție e mort (Xposed/root) → oprire + alertă.
  */
 class CoverageController(private val ctx: Context, private val tickHz: Int) {
@@ -29,17 +32,19 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
     }
 
     data class Outcome(
-        val ratio: Double, val retry: Boolean, val dead: Boolean,
+        val ratio: Double, val dead: Boolean,
         val sampled: Boolean, val status: String
     )
 
     companion object {
         private const val PREFS = "mw_autotune"
-        const val ROW_MIN = 40.0;  const val ROW_MAX = 170.0
+        // ROW_MAX plafonat la ~100m: hexagoanele Bump (H3 res-10) au ~114m flat-to-flat, deci rânduri
+        // >~100m sar benzi întregi de celule. Plafonul ține pasajul rapid la ~1-2% goluri (nu ~10%) →
+        // cleanup-ul „garanție 100%" din MockService are doar câteva celule de țintit per bloc.
+        const val ROW_MIN = 40.0;  const val ROW_MAX = 100.0
         const val STEP_MIN = 15.0; const val STEP_MAX = 50.0
-        private const val TARGET = 0.90       // acoperire-țintă acceptabilă
-        private const val HIGH = 0.965        // peste asta avem margine → lărgim agresiv
-        private const val RETRY_THRESHOLD = 0.80  // sub asta reacoperim blocul (self-check „întoarce-te")
+        private const val TARGET = 0.98       // acoperire-țintă: ~completă DINTR-O TRECERE (nu ~90% + reveniri)
+        private const val HIGH = 0.995        // practic perfect → mai avem margine să lărgim agresiv
         private const val MIN_SAMPLE = 25     // sub atâtea celule așteptate, ratio e zgomot → nu adapta
         private const val DEAD_LIMIT = 4      // blocuri la rând cu 0 deblocate (deși aveau) → pipeline mort
         private const val EMA_A = 0.45
@@ -88,13 +93,13 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
 
     /**
      * Înregistrează rezultatul real al blocului (din UnlockedMask: câte celule blocate au fost
-     * deblocate efectiv). Adaptează knob-urile și întoarce verdictul (retry / dead / status).
+     * deblocate efectiv). Adaptează knob-urile și întoarce verdictul (dead / status).
      */
     fun record(expected: Int, gained: Int): Outcome {
         blocksDone++
         if (expected < MIN_SAMPLE) {
             // eșantion prea mic → ratio nesigur; nu adaptăm, nu numărăm spre „dead"
-            return Outcome(1.0, retry = false, dead = false, sampled = false,
+            return Outcome(1.0, dead = false, sampled = false,
                 status = "bloc mic (%d cel)".format(expected))
         }
         val ratio = gained.toDouble() / expected
@@ -104,7 +109,7 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
         // detectare pipeline mort: deblocare ZERO deși aveam celule de deblocat
         if (gained == 0) deadStreak++ else deadStreak = 0
         if (deadStreak >= DEAD_LIMIT) {
-            return Outcome(ratio, retry = false, dead = true, sampled = true,
+            return Outcome(ratio, dead = true, sampled = true,
                 status = "PIPELINE MORT: 0 deblocate × $deadStreak blocuri — verifică Xposed/root")
         }
 
@@ -122,23 +127,26 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
             // memorează cea mai bună combinație fezabilă (area rate maxim)
             if (cand.areaRate > bestRate) { bestRate = cand.areaRate; bestRow = cand.rowM; bestStep = cand.stepM }
         } else {
-            // candidatul a pierdut teritoriu → respinge: trage knob-ul sub bază + probe mai mic
+            // Candidatul a lăsat hexagoane nedescoperite → respinge și ÎNDESEȘTE proporțional cu
+            // DEFICITUL (câte a ratat): puține ratări → corecție mică; multe → trage tare înapoi, ca
+            // trecerea următoare să le prindă pe TOATE dintr-o dată (fără reveniri).
+            val shortfall = (TARGET - ratio).coerceIn(0.0, TARGET)
+            val pull = 0.5 + shortfall / TARGET * 3.0   // 0.5 (abia sub țintă) … ~3.5 (acoperire slabă)
             if (probeKnob == 0) {
-                baseRow = (baseRow - rowProbe * 0.5).coerceIn(ROW_MIN, ROW_MAX)
+                baseRow = (baseRow - rowProbe * pull).coerceIn(ROW_MIN, ROW_MAX)
                 rowProbe = (rowProbe * 0.5).coerceAtLeast(3.0)
             } else {
-                baseStep = (baseStep - stepProbe * 0.5).coerceIn(STEP_MIN, STEP_MAX)
+                baseStep = (baseStep - stepProbe * pull).coerceIn(STEP_MIN, STEP_MAX)
                 stepProbe = (stepProbe * 0.5).coerceAtLeast(2.0)
             }
         }
         probeKnob = probeKnob xor 1   // alternează knob-ul probat
         persist()
 
-        val retry = ratio < RETRY_THRESHOLD
         val best = Params(bestRow, bestStep, tickHz)
         val status = "acop %.0f%% (ema %.0f%%) • învățat %.0fm/%.0fkm/h"
             .format(ratio * 100, ema * 100, bestRow, best.speedKmh)
-        return Outcome(ratio, retry, dead = false, sampled = true, status = status)
+        return Outcome(ratio, dead = false, sampled = true, status = status)
     }
 
     /** Resetează contorul „pipeline mort" după un back-off (dă pipeline-ului o nouă șansă). */

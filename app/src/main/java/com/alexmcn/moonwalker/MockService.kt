@@ -45,6 +45,7 @@ class MockService : Service() {
         private const val DEAD_BACKOFF_MS = 60_000L      // pauză după „pipeline mort" înainte de reîncercare
         private const val SEEK_MAX_PASSES = 4            // pasaje seek & destroy (re-scanare găuri) înainte de oprire
         private const val SEEK_HITS = 3                  // câte fix-uri staționare „lovesc" fiecare gaură
+        private const val CLEANUP_MAX_PASSES = 3         // pasaje „garanție 100%" per bloc (țintire directă a celulelor rămase)
         private const val IASI_LAT = 47.16; private const val IASI_LON = 27.58  // fallback anchor
         const val ACTION_STOP = "com.alexmcn.moonwalker.STOP"        // PAUZĂ: rămâi parcat pe loc
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
@@ -315,6 +316,9 @@ class MockService : Service() {
                             // NU numărăm spre „pipeline mort"; mergem mai departe (fail-safe).
                             statusText = "AUTO • bloc %d acoperit (măsurare indisponibilă)".format(blockN)
                         } else {
+                            // AUTO-TUNING: hrănim controllerul DOAR cu acoperirea pasajului RAPID (înainte de
+                            // cleanup). Dacă i-am da 100% post-cleanup, ar lărgi rândurile la fiecare bloc →
+                            // pasaj rapid tot mai prost, cleanup tot mai lung. Semnalul lui = pasajul rapid.
                             val oc = ctrl.record(expected.size, UnlockedMask.gainedAmong(expected))
                             if (oc.dead) {
                                 // NU renunța (autonomie): alertă zgomotoasă + back-off + self-heal, apoi reia.
@@ -323,19 +327,15 @@ class MockService : Service() {
                                 try { Thread.sleep(DEAD_BACKOFF_MS) } catch (_: InterruptedException) {}
                                 UnlockedMask.refresh(applicationContext)
                                 ctrl.resetDead()
-                            } else if (oc.retry && !stopFlag) {
-                                // SELF-CHECK pas 3 „întoarce-te": prea puțin deblocat → REACOPERĂ dens/lent.
-                                val sp = ctrl.safeParams()
-                                prev = coverBlock(bz, sp, prev,
-                                    "AUTO • REIAU bloc %d (acop %.0f%%) • %.0fm/%.0fkm/h"
-                                        .format(blockN, oc.ratio * 100, sp.rowM, sp.speedKmh))
-                                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
-                                UnlockedMask.refresh(applicationContext)
-                                val g2 = UnlockedMask.gainedAmong(expected)
-                                statusText = "AUTO • bloc %d reluat → acop %.0f%%"
-                                    .format(blockN, g2 * 100.0 / expected.size)
                             } else {
                                 statusText = "AUTO • bloc %d • %s".format(blockN, oc.status)
+                                // GARANȚIE 100% („întoarce-te până le acoperă"): pasajul rapid lasă prin design
+                                // ~1-2% celule. Acum țintim DIRECT centrul fiecărei celule RĂMASE blocate din
+                                // `expected` și o lovim (fix staționar), repetând până blocul e 100% (sau
+                                // CLEANUP_MAX_PASSES dacă pipeline-ul ratează unele). NU hrănește tuner-ul.
+                                val sp = ctrl.safeParams()
+                                prev = cleanupBlockToFull(expected, prev, 1000L / sp.tickHz,
+                                    sp.speedKmh, sp.stepM, blockN)
                             }
                         }
                         AutoState.saveSpiral(applicationContext, anchor[0], anchor[1], x, y, dx, dy, blockN)
@@ -407,18 +407,66 @@ class MockService : Service() {
     private fun coverBlock(bz: Zone, p: CoverageController.Params, prev0: DoubleArray?, status: String): DoubleArray? {
         val tickMs = 1000L / p.tickHz
         val g = RouteGenerator(bz, p.rowM, p.stepM, false, true)   // vertical=false, skipUnlocked=true
-        var prev = prev0
+        // Materializăm serpentina ca să-i putem alege sensul (vezi mai jos). Doar puncte din zone
+        // ÎNCĂ blocate (skipUnlocked) → câteva mii de puncte, cost neglijabil.
+        val pts = ArrayList<DoubleArray>()
         var t = g.next()
-        while (t != null && !stopFlag) {
-            prev = drive(prev ?: t, t, tickMs, p.speedKmh, p.stepM, status)
-            t = g.next()
+        while (t != null) { pts.add(t); t = g.next() }
+        if (pts.isEmpty()) return prev0
+        // CONTINUITATE între blocuri („spirală fără salturi"): serpentina are 2 capete; pornește din
+        // cel mai apropiat de unde am rămas (prev0). Dacă ultimul capăt e mai aproape, o parcurgem
+        // INVERS (tot serpentină validă, doar în sens opus) → fără „cusătură" lungă de la bloc la bloc.
+        if (prev0 != null &&
+            RouteGenerator.haversine(prev0, pts.last()) < RouteGenerator.haversine(prev0, pts.first()))
+            pts.reverse()
+        var prev = prev0
+        for (pt in pts) {
+            if (stopFlag) break
+            prev = drive(prev ?: pt, pt, tickMs, p.speedKmh, p.stepM, status)
+        }
+        return prev
+    }
+
+    /**
+     * GARANȚIE 100% per bloc: după pasajul rapid (care lasă prin design ~1-2% goluri), țintește DIRECT
+     * centrul fiecărei celule din `expected` care e ÎNCĂ blocată și o „lovește" (câteva fix-uri
+     * staționare — mult mai sigur decât o serpentină mai densă, care rămâne statistică). Re-măsoară după
+     * fiecare pasaj (self-check): celulele prinse dispar, cele ratate se reîncearcă, până la 0 rămase
+     * sau CLEANUP_MAX_PASSES (ex. pipeline care ratează → nu buclăm la infinit). Întoarce ultima poziție.
+     */
+    private fun cleanupBlockToFull(
+        expected: LongArray, prev0: DoubleArray?, tickMs: Long,
+        speedKmh: Double, stepM: Double, blockN: Int
+    ): DoubleArray? {
+        var prev = prev0
+        var pass = 0
+        // Masca e deja proaspătă (refresh din apelant pt. record) → primul pasaj folosește starea curentă.
+        while (!stopFlag && pass < CLEANUP_MAX_PASSES) {
+            val centers = UnlockedMask.stillLockedCenters(expected)
+            if (centers.isEmpty()) { statusText = "AUTO • bloc %d ✓ 100%%".format(blockN); break }
+            val ordered = orderLawnmower(centers)
+            for ((idx, h) in ordered.withIndex()) {
+                if (stopFlag) break
+                if (idx % 16 == 0) renewWakelock()
+                prev = drive(prev ?: h, h, tickMs, speedKmh, stepM,
+                    "AUTO • bloc %d • umplu găuri %d/%d (pas %d)".format(blockN, idx + 1, ordered.size, pass + 1))
+                // „lovește" celula: câteva fix-uri staționare pe centru ca Bump s-o înregistreze sigur
+                repeat(SEEK_HITS) {
+                    if (!stopFlag) { pushLocation(h[0], h[1], 0.0); try { Thread.sleep(tickMs) } catch (_: InterruptedException) {} }
+                }
+            }
+            // Settle + re-măsoară: găurile lovite dispar din mască → pasajul următor țintește doar ce-a rămas.
+            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+            if (!UnlockedMask.refresh(applicationContext)) break   // fără măsurătoare validă → ieși (fail-safe)
+            pass++
         }
         return prev
     }
 
     /**
      * SEEK & DESTROY: vânează hexagoanele singulare nedeblocate (găuri în interiorul acoperirii) și
-     * le deblochează, mergând fizic de la una la alta (fără warp), pe un traseu „mașină de tuns iarba".
+     * le deblochează, mergând fizic de la una la alta (fără warp), MEREU la cea mai apropiată de
+     * poziția curentă (nearest-first), ca să nu sară în cealaltă parte a țării.
      * După fiecare pasaj RE-SCANEAZĂ (self-check): găurile deblocate dispar, cele ratate se reîncearcă.
      * Se oprește când nu mai rămân găuri sau după SEEK_MAX_PASSES (ex. pipeline mort → găurile persistă).
      */
@@ -431,7 +479,9 @@ class MockService : Service() {
             UnlockedMask.refresh(applicationContext)
             val holes = UnlockedMask.isolatedLockedHoles()
             if (holes.isEmpty()) { statusText = "SEEK ✓ fără găuri rămase (pasaj $pass)"; break }
-            val ordered = orderLawnmower(holes)
+            // Nearest-first din POZIȚIA CURENTĂ: mergi mereu la cea mai apropiată gaură, apoi re-țintește
+            // de-acolo cea mai apropiată ș.a.m.d. — fără salturi în cealaltă parte a țării (≪ timp).
+            val ordered = orderNearestFirst(prev, holes)
             val total = ordered.size
             for ((idx, h) in ordered.withIndex()) {
                 if (stopFlag) break
@@ -446,6 +496,32 @@ class MockService : Service() {
             pass++
         }
         if (!stopFlag && !statusText.startsWith("SEEK ✓")) statusText = "SEEK: oprit"
+    }
+
+    /**
+     * Ordonează găurile prin nearest-neighbor lacom pornind din `start` (poziția curentă): la fiecare
+     * pas alege gaura cea mai apropiată de unde ești ACUM. Minimizează drumul total — botul nu mai e
+     * trimis în cealaltă parte a țării ca la traseul pe benzi. Distanță planară ieftină (equirectangular,
+     * fără trig per comparație) — suficient pt. „cel mai apropiat". O(N²), dar N (găuri izolate) e mic.
+     */
+    private fun orderNearestFirst(start: DoubleArray?, holes: List<DoubleArray>): List<DoubleArray> {
+        if (holes.size <= 1) return holes
+        val remaining = ArrayList(holes)
+        val out = ArrayList<DoubleArray>(holes.size)
+        var cur = start ?: remaining.removeAt(remaining.size - 1).also { out.add(it) }
+        val kLon = cos(Math.toRadians(cur[0]))   // scalare longitudine→metri la latitudinea zonei
+        while (remaining.isNotEmpty()) {
+            var bestIdx = 0; var bestD = Double.MAX_VALUE
+            for (i in remaining.indices) {
+                val h = remaining[i]
+                val dLat = h[0] - cur[0]; val dLon = (h[1] - cur[1]) * kLon
+                val d = dLat * dLat + dLon * dLon
+                if (d < bestD) { bestD = d; bestIdx = i }
+            }
+            cur = remaining.removeAt(bestIdx)
+            out.add(cur)
+        }
+        return out
     }
 
     /** Ordonează găurile pe un traseu boustrophedon (benzi de latitudine, direcție alternantă). */

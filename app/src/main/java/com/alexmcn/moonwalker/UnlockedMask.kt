@@ -129,6 +129,25 @@ object UnlockedMask {
     }
 
     /**
+     * Centrele [lat,lon] ale celulelor din `expected` (cele blocate înainte de acoperire) care sunt
+     * ÎNCĂ blocate ACUM (după acoperire + refresh()). = exact găurile rămase în acest bloc.
+     * Folosit de cleanup-ul „garanție 100%": botul țintește direct fiecare centru, nu mai face
+     * serpentină statistică. Fail-safe: [] dacă masca/H3 indisponibile (→ fără cleanup, dar fără greșeli).
+     */
+    fun stillLockedCenters(expected: LongArray): List<DoubleArray> {
+        val locked = cells ?: return emptyList()
+        val core = h3 ?: return emptyList()
+        val out = ArrayList<DoubleArray>()
+        for (c in expected) {
+            if (Arrays.binarySearch(locked, c) < 0) {   // încă blocată
+                val ll = try { core.cellToLatLng(c) } catch (_: Throwable) { continue }
+                out.add(doubleArrayOf(ll.lat, ll.lng))
+            }
+        }
+        return out
+    }
+
+    /**
      * SEEK & DESTROY: hexagoanele „găuri" — celule NEDEBLOCATE înconjurate de celule deblocate
      * (≥ minUnlockedNeighbors din 6 vecini deblocați) → hexagoane singulare ratate în interiorul
      * teritoriului acoperit. Frontiera exterioară a acoperirii are <4 vecini deblocați → e exclusă
