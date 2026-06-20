@@ -250,14 +250,16 @@ class MockService : Service() {
             if (seek) {
                 runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
             } else if (auto) {
-                // AUTO-EXTINDERE AUTONOMĂ + SELF-CHECK + AUTO-TUNING:
-                //  • spirală pătrată de blocuri (3 km) din anchor (locația ta / Iași), cel-mai-aproape-întâi,
-                //    LIMITATĂ la România (RomaniaGeo) — pornește de-acasă din Iași și acoperă toată țara;
-                //  • pt. fiecare bloc: măsoară ce e ÎNCĂ blocat (UnlockedMask) → acoperă → re-măsoară cât
-                //    a deblocat efectiv (ratio). Blocurile deja 100% deblocate se sar instant;
-                //  • SELF-CHECK: dacă ratio prea mic → REACOPERĂ blocul (mai dens/lent) = „se întoarce";
-                //  • AUTO-TUNING: CoverageController ajustează singur rowM/viteza ca să maximizeze
-                //    teritoriul/secundă păstrând acoperirea ≥ ~90%. Rulează până la STOP sau țară acoperită.
+                // MOD UNIFICAT AUTONOM (seek + extindere într-un singur mod), în 3 faze:
+                //  • FAZA 1 (seek): du-te la cel mai apropiat hexagon nedeblocat de poziția curentă și
+                //    continuă nearest-first până cureți găurile singulare apropiate (doar la start proaspăt);
+                //  • FAZA 2 (extindere): spirală pătrată de blocuri (3 km) din anchor, cel-mai-aproape-întâi,
+                //    LIMITATĂ la România (RomaniaGeo). Pt. fiecare bloc: măsoară ce e ÎNCĂ blocat → acoperă
+                //    (pasaj rapid) → re-măsoară → AUTO-TUNING (CoverageController reglează rowM/viteza ca să
+                //    prindă ~tot dintr-o trecere) → cleanup direct pe celulele rămase = 100% per bloc.
+                //    Blocurile deja deblocate se sar instant; spirala decide singură când a terminat țara;
+                //  • FAZA 3 (seek final): după acoperirea țării, prinde reziduurile de pe inelul de margine
+                //    al blocurilor (acum găuri izolate) → 100% real. Rulează până la STOP sau țară 100%.
                 val anchor = transitionOrigin ?: doubleArrayOf(IASI_LAT, IASI_LON)
                 val ctrl = CoverageController(applicationContext, tickHz)
                 val mLat = 111_320.0
@@ -274,6 +276,14 @@ class MockService : Service() {
                 AutoState.loadSpiral(applicationContext, anchor[0], anchor[1])?.let { s ->
                     x = s[0]; y = s[1]; dx = s[2]; dy = s[3]; blockN = s[4]
                 }
+                // FAZA 1 — CURĂȚĂ GĂURILE APROPIATE: la START PROASPĂT (blockN==0, nu pe reluare
+                // mid-spirală), du-te întâi la cel mai apropiat hexagon nedeblocat de poziția curentă
+                // și continuă nearest-first (seek) până nu mai rămân găuri singulare. Abia apoi spirala.
+                if (blockN == 0 && !stopFlag) {
+                    prev = runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick, tag = "AUTO curăț găuri")
+                }
+                // FAZA 2 — EXTINDERE ÎN PĂTRATE CONCENTRICE: spirala decide singură per bloc dacă mai e
+                // ceva de acoperit (sare blocurile deja deblocate, se termină la marginea țării).
                 while (!stopFlag) {
                     if (max(abs(x), abs(y)) > maxRing) {
                         statusText = "AUTO ✓ România acoperită (%d blocuri)".format(blockN)
@@ -342,6 +352,14 @@ class MockService : Service() {
                     } catch (e: Exception) {
                         android.util.Log.w("MockService", "AUTO bloc $blockN eroare: ${e.message}")
                     }
+                }
+                // FAZA 3 — SEEK FINAL (doar dacă spirala a terminat natural toată țara): cleanup-ul
+                // per-bloc folosește insetul (±1250m), deci inelul de margine al fiecărui bloc (ultimii
+                // ~250m) e atins doar de pasajul rapid. După ce toate blocurile sunt acoperite, acele
+                // reziduuri sunt acum GĂURI IZOLATE (înconjurate de deblocat) → un seek le prinde → 100% real.
+                if (!stopFlag && statusText.startsWith("AUTO ✓")) {
+                    prev = runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick, tag = "AUTO găuri finale")
+                    if (!stopFlag) statusText = "AUTO ✓ România 100% (incl. margini)"
                 }
                 if (!stopFlag && !statusText.startsWith("AUTO ✓") && !statusText.startsWith("⚠"))
                     statusText = "AUTO: oprit"
@@ -470,15 +488,16 @@ class MockService : Service() {
      * După fiecare pasaj RE-SCANEAZĂ (self-check): găurile deblocate dispar, cele ratate se reîncearcă.
      * Se oprește când nu mai rămân găuri sau după SEEK_MAX_PASSES (ex. pipeline mort → găurile persistă).
      */
-    private fun runSeekAndDestroy(prev0: DoubleArray?, tickMs: Long, speedKmh: Double, metersPerTick: Double) {
+    private fun runSeekAndDestroy(prev0: DoubleArray?, tickMs: Long, speedKmh: Double, metersPerTick: Double,
+                                  tag: String = "SEEK"): DoubleArray? {
         var prev = prev0
         var pass = 0
         while (!stopFlag && pass < SEEK_MAX_PASSES) {
             renewWakelock()
-            statusText = "SEEK • scanez găuri..."; updateNotif(statusText)
+            statusText = "$tag • scanez găuri..."; updateNotif(statusText)
             UnlockedMask.refresh(applicationContext)
             val holes = UnlockedMask.isolatedLockedHoles()
-            if (holes.isEmpty()) { statusText = "SEEK ✓ fără găuri rămase (pasaj $pass)"; break }
+            if (holes.isEmpty()) { statusText = "$tag ✓ fără găuri rămase (pasaj $pass)"; break }
             // Nearest-first din POZIȚIA CURENTĂ: mergi mereu la cea mai apropiată gaură, apoi re-țintește
             // de-acolo cea mai apropiată ș.a.m.d. — fără salturi în cealaltă parte a țării (≪ timp).
             val ordered = orderNearestFirst(prev, holes)
@@ -487,7 +506,7 @@ class MockService : Service() {
                 if (stopFlag) break
                 if (idx % 16 == 0) renewWakelock()
                 prev = drive(prev ?: h, h, tickMs, speedKmh, metersPerTick,
-                    "🎯 SEEK • pasaj %d • %d/%d găuri".format(pass + 1, idx + 1, total))
+                    "🎯 $tag • pasaj %d • %d/%d găuri".format(pass + 1, idx + 1, total))
                 // „lovește" celula: câteva fix-uri staționare pe centru ca Bump s-o înregistreze sigur
                 repeat(SEEK_HITS) {
                     if (!stopFlag) { pushLocation(h[0], h[1], 0.0); try { Thread.sleep(tickMs) } catch (_: InterruptedException) {} }
@@ -495,7 +514,8 @@ class MockService : Service() {
             }
             pass++
         }
-        if (!stopFlag && !statusText.startsWith("SEEK ✓")) statusText = "SEEK: oprit"
+        if (!stopFlag && !statusText.startsWith("$tag ✓")) statusText = "$tag: oprit"
+        return prev
     }
 
     /**

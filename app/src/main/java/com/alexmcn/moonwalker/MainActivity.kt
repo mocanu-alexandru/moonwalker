@@ -528,7 +528,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(MockService.EXTRA_POLY, poly)
         }
         startForegroundService(i)
-        toast("🤖 AUTO pornit: acoper România din Iași • self-check + auto-tuning • STOP ca să oprești")
+        toast("🤖 AUTO pornit: întâi curăț găurile apropiate (nearest-first), apoi extind în pătrate • STOP ca să oprești")
     }
 
     /**
