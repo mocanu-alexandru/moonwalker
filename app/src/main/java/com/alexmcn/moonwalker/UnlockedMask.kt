@@ -174,6 +174,18 @@ object UnlockedMask {
     }
 
     /**
+     * Centrele [lat,lon] ALINIATE pe index cu `cellsArr` (null pe celulă care eșuează) — pt. binning
+     * în benzi (fiecare celulă trebuie să-și știe banda). Fail-safe: tot null dacă H3 indisponibil.
+     */
+    fun cellCentersAligned(cellsArr: LongArray): Array<DoubleArray?> {
+        val core = h3 ?: return arrayOfNulls(cellsArr.size)
+        return Array(cellsArr.size) { i ->
+            try { val ll = core.cellToLatLng(cellsArr[i]); doubleArrayOf(ll.lat, ll.lng) }
+            catch (_: Throwable) { null }
+        }
+    }
+
+    /**
      * Câte din `expected` (celule blocate înainte de acoperire) apar ACUM în setul deblocat.
      * Se cheamă DUPĂ acoperire + refresh(). ratio = gainedAmong/expected.size = acoperirea reală.
      */
