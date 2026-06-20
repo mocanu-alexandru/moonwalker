@@ -36,6 +36,8 @@ class MockService : Service() {
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
+        private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
+        private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → blast-radius; sub = serpentină directă peste blocat
         private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
         private const val WAKELOCK_MS = 60 * 60 * 1000L  // timeout wakelock; reînnoit per bloc (renewWakelock)
         private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
@@ -361,13 +363,23 @@ class MockService : Service() {
                     AutoState.saveCounty(applicationContext, origin[0], origin[1], ci + 1); ci++; continue
                 }
 
-                // (2) baleiere blast-radius clipată la județ. Centru: jud. de ACASĂ (ci==0) → originea GPS
-                // (blast-radius real de unde stai); restul → centroidul județului (rinele pornesc din
-                // interior, nu din `prev` aflat eventual la zeci de km → fără inele goale parcurse degeaba).
+                // (2) BALEIERE — alege pattern-ul după cât de blocat e județul:
+                //  • PROASPĂT (≥ FRESH_LOCKED_FRACTION blocat) → blast-radius (inele concentrice; eficient
+                //    când e mai tot blocat, conectori ≈ rowM, e pattern-ul cerut). Centru: jud. de ACASĂ
+                //    (ci==0) → originea GPS; restul → centroidul (inele pornesc din interior, nu din `prev`).
+                //  • PARȚIAL (mai ales deblocat) → serpentină DIRECTĂ peste celulele blocate: inelele ar
+                //    traversa toată lățimea județului ca să atingă câteva petice → în schimb rutăm prin
+                //    `expected` ordonat boustrophedon (benzi de latitudine, local) → minim de drum prin deblocat.
                 val p = ctrl.nextParams()
-                val center = if (ci == 0) origin else centroid(poly)
-                prev = coverRings(zone, center[0], center[1], p, prev,
-                    "AUTO • %s (%d/%d) • %.0fm/%.0fkm/h".format(name, ci + 1, counties.size, p.rowM, p.speedKmh))
+                val lockedFraction = expected.size / max(1.0, polygonCellCapacity(poly, zone))
+                prev = if (lockedFraction >= FRESH_LOCKED_FRACTION) {
+                    val center = if (ci == 0) origin else centroid(poly)
+                    coverRings(zone, center[0], center[1], p, prev,
+                        "AUTO • %s (%d/%d) • blast %.0fm/%.0fkm/h".format(name, ci + 1, counties.size, p.rowM, p.speedKmh))
+                } else {
+                    coverLockedDirect(expected, p, prev,
+                        "AUTO • %s (%d/%d) • țintit %.0f%% blocat".format(name, ci + 1, counties.size, lockedFraction * 100))
+                }
 
                 // (3) settle → re-măsoară → auto-tuning (pe pasajul RAPID, înainte de cleanup)
                 try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
@@ -465,6 +477,40 @@ class MockService : Service() {
             pt = g.next()
         }
         return prev
+    }
+
+    /**
+     * Serpentină DIRECTĂ peste celulele blocate (rutare „doar prin nedeblocat", minim de deblocat
+     * traversat): centrele celulelor `expected` ordonate boustrophedon (benzi de latitudine, local) și
+     * conduse CONTINUU la `p.speedKmh` (NU fix-uri staționare — acoperim trecând prin ele). Conectori
+     * doar la golurile din interiorul unui rând. Pt. județe majoritar deblocate, unde inelele ar
+     * traversa toată lățimea județului. Întoarce ultima poziție.
+     */
+    private fun coverLockedDirect(expected: LongArray, p: CoverageController.Params,
+                                  prev0: DoubleArray?, status: String): DoubleArray? {
+        val tickMs = 1000L / p.tickHz
+        val ordered = orderLawnmower(UnlockedMask.cellsToCenters(expected))
+        var prev = prev0
+        for ((idx, h) in ordered.withIndex()) {
+            if (stopFlag) break
+            if (idx % 64 == 0) renewWakelock()
+            prev = drive(prev ?: h, h, tickMs, p.speedKmh, p.stepM, status)
+        }
+        return prev
+    }
+
+    /** Estimează câte celule H3 res-10 încap în poligon (arie shoelace în metri / aria unei celule). */
+    private fun polygonCellCapacity(poly: List<DoubleArray>, zone: Zone): Double {
+        val mLat = 111_320.0
+        val mLon = mLat * cos(Math.toRadians((zone.latMin + zone.latMax) / 2.0))
+        var a2 = 0.0
+        for (i in poly.indices) {
+            val j = (i + 1) % poly.size
+            val x1 = poly[i][1] * mLon; val y1 = poly[i][0] * mLat
+            val x2 = poly[j][1] * mLon; val y2 = poly[j][0] * mLat
+            a2 += x1 * y2 - x2 * y1
+        }
+        return abs(a2) / 2.0 / H3_RES10_AREA_M2
     }
 
     /**

@@ -160,6 +160,20 @@ object UnlockedMask {
     }
 
     /**
+     * Centrele [lat,lon] ale unui set DAT de celule (indiferent dacă-s deblocate sau nu). Folosit pt.
+     * serpentina directă peste celulele blocate (rutare „doar prin nedeblocat"). Fail-safe: [].
+     */
+    fun cellsToCenters(cellsArr: LongArray): List<DoubleArray> {
+        val core = h3 ?: return emptyList()
+        val out = ArrayList<DoubleArray>(cellsArr.size)
+        for (c in cellsArr) {
+            val ll = try { core.cellToLatLng(c) } catch (_: Throwable) { continue }
+            out.add(doubleArrayOf(ll.lat, ll.lng))
+        }
+        return out
+    }
+
+    /**
      * Câte din `expected` (celule blocate înainte de acoperire) apar ACUM în setul deblocat.
      * Se cheamă DUPĂ acoperire + refresh(). ratio = gainedAmong/expected.size = acoperirea reală.
      */
