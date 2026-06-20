@@ -28,8 +28,6 @@
 
     </FrameLayout>
 
-    <!-- ── ESENȚIAL (mereu vizibil) ─────────────────────────────────────── -->
-
     <!-- Banner permisiuni/setup — apare doar când lipsește ceva -->
     <TextView
         android:id="@+id/permsLbl"
@@ -42,17 +40,18 @@
         android:textSize="11sp"
         android:visibility="gone" />
 
-    <!-- Status live (blocuri, acoperire, viteză învățată) -->
+    <!-- Status live (faze, blocuri, acoperire, viteză învățată) -->
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:padding="8dp"
         android:textSize="13sp"
-        android:text="○ oprit" />
+        android:text="○ pornește automat la deschidere" />
 
-    <!-- Buton principal: pornește acoperirea autonomă a României -->
-    <Button android:id="@+id/btnAuto"
+    <!-- Buton unic de control (pornește/oprește) — eticheta se schimbă după stare.
+         Pornirea e automată la deschiderea aplicației; ăsta e doar override manual. -->
+    <Button android:id="@+id/btnStop"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="🤖 PORNEȘTE — acoperă România (autonom)"
@@ -61,25 +60,7 @@
         android:paddingTop="10dp"
         android:paddingBottom="10dp" />
 
-    <!-- Seek & destroy: vânează hexagoanele singulare nedeblocate (găuri în acoperire) -->
-    <Button android:id="@+id/btnSeek"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="🎯 Curăță găurile (seek &amp; destroy)"
-        android:textSize="13sp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp" />
-
-    <!-- STOP: apăsare scurtă = pauză (parcat); apăsare lungă = oprire completă -->
-    <Button android:id="@+id/btnStop"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="■ STOP  (ține apăsat = oprire completă)"
-        android:textSize="13sp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp" />
-
-    <!-- Setup: developer options + update (mic) -->
+    <!-- Setup: developer options (mock location) + update (mic) -->
     <LinearLayout
         android:orientation="horizontal"
         android:layout_width="match_parent"
@@ -96,110 +77,6 @@
             android:text="Verifică update"
             android:textSize="11sp"
             style="?attr/borderlessButtonStyle" />
-    </LinearLayout>
-
-    <!-- Toggle „Avansat" (manual) — colapsat implicit -->
-    <Button
-        android:id="@+id/btnToggle"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="▾ Avansat (mod manual)"
-        android:textSize="11sp"
-        android:paddingTop="2dp"
-        android:paddingBottom="2dp"
-        style="?attr/borderlessButtonStyle" />
-
-    <!-- ── AVANSAT / MANUAL — ascuns implicit ───────────────────────────── -->
-    <LinearLayout
-        android:id="@+id/controlPanel"
-        android:orientation="vertical"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:visibility="gone">
-
-        <TextView
-            android:id="@+id/zoneLbl"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="6dp"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            android:text="Apasă pe hartă sau alege din liste" />
-
-        <LinearLayout
-            android:orientation="horizontal"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content">
-            <Spinner
-                android:id="@+id/countrySpinner"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content" />
-            <Spinner
-                android:id="@+id/level1Spinner"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content" />
-        </LinearLayout>
-
-        <Spinner
-            android:id="@+id/level2Spinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <ToggleButton
-            android:id="@+id/btnDirection"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textOff="↔ Orizontal (E-V)"
-            android:textOn="↕ Vertical (N-S)"
-            android:checked="false"
-            android:textSize="12sp"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp" />
-
-        <TextView android:id="@+id/hzLbl"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Frecvență: 1 inj/s → 270 km/h virtual" android:textSize="12sp" />
-        <SeekBar android:id="@+id/hzBar"
-            android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-        <TextView android:id="@+id/rowLbl"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Distanță rânduri: 100 m" android:textSize="12sp" />
-        <SeekBar android:id="@+id/rowBar"
-            android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-        <TextView android:id="@+id/stepLbl"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Pas pe rând: 10 m" android:textSize="12sp" />
-        <SeekBar android:id="@+id/stepBar"
-            android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-        <TextView android:id="@+id/posLbl"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Start din: 0%" android:textSize="12sp" />
-        <SeekBar android:id="@+id/posBar"
-            android:layout_width="match_parent" android:layout_height="wrap_content" />
-
-        <Button android:id="@+id/btnOptim"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="⚡ Setări optime — acoperire 100% (Bump)"
-            android:textSize="12sp"
-            android:paddingTop="2dp" android:paddingBottom="2dp" />
-
-        <CheckBox android:id="@+id/chkSkipUnlocked"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="🔓 Sari zonele deja deblocate"
-            android:textSize="12sp" />
-
-        <Button android:id="@+id/btnStart"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="START (zona selectată manual)"
-            android:textSize="12sp"
-            android:paddingTop="4dp" android:paddingBottom="4dp" />
-
     </LinearLayout>
 
     <TextView
