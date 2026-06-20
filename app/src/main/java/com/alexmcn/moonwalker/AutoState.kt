@@ -32,33 +32,31 @@ object AutoState {
         ctx.prefs().edit().clear().apply()
     }
 
-    /** Salvează poziția spiralei + ancora (după fiecare bloc) ca să putem relua exact. */
-    fun saveSpiral(ctx: Context, anchorLat: Double, anchorLon: Double,
-                   x: Int, y: Int, dx: Int, dy: Int, blockN: Int) {
+    /**
+     * Salvează ancora (= originea blast-radius, ≈ „acasă") + indexul județului curent din ordinea
+     * nearest-first. Reluarea sare județele deja terminate. Ancora se persistă din primul fix → ordinea
+     * județelor (deterministă din ancoră) e identică la fiecare repornire, deci `idx` rămâne valid.
+     */
+    fun saveCounty(ctx: Context, anchorLat: Double, anchorLon: Double, idx: Int) {
         ctx.prefs().edit()
             .putLong("aLat", anchorLat.toRawBits())
             .putLong("aLon", anchorLon.toRawBits())
-            .putInt("sx", x).putInt("sy", y)
-            .putInt("sdx", dx).putInt("sdy", dy)
-            .putInt("sBlk", blockN)
+            .putInt("cIdx", idx)
             .apply()
     }
 
     /**
-     * Întoarce [x,y,dx,dy,blockN] dacă există o spirală salvată cu ancoră ≈ cea curentă; altfel null
-     * (→ pornește spirală nouă). Așa reboot-ul/redeschiderea continuă frontiera, nu reia tot.
+     * Indexul județului de la care se reia, dacă ancora salvată ≈ cea curentă (aceeași origine →
+     * aceeași ordine de județe). Altfel 0 (origine nouă → reordonează de la zero). Reboot/redeschidere
+     * continuă de la județul neterminat, nu reia tot.
      */
-    fun loadSpiral(ctx: Context, anchorLat: Double, anchorLon: Double): IntArray? {
+    fun countyIndex(ctx: Context, anchorLat: Double, anchorLon: Double): Int {
         val p = ctx.prefs()
-        if (!p.contains("sx")) return null
+        if (!p.contains("cIdx")) return 0
         val sLat = Double.fromBits(p.getLong("aLat", 0L))
         val sLon = Double.fromBits(p.getLong("aLon", 0L))
-        if (haversine(anchorLat, anchorLon, sLat, sLon) > RESUME_RADIUS_M) return null
-        return intArrayOf(
-            p.getInt("sx", 0), p.getInt("sy", 0),
-            p.getInt("sdx", 0), p.getInt("sdy", -1),
-            p.getInt("sBlk", 0)
-        )
+        if (haversine(anchorLat, anchorLon, sLat, sLon) > RESUME_RADIUS_M) return 0
+        return p.getInt("cIdx", 0)
     }
 
     /**

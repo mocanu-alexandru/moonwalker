@@ -118,6 +118,48 @@ object UnlockedMask {
     }
 
     /**
+     * Ca `lockedCellsInBbox`, dar pe POLIGONUL real al unei zone (județ): celulele H3 res-10 al căror
+     * centru cade în poligon și sunt ÎNCĂ blocate. = celulele pe care trebuie să le deblocăm acoperind
+     * județul. Folosit pt. GARANȚIA 100% per județ (țintim direct ce rămâne blocat la final). Fail-safe: [].
+     */
+    fun lockedCellsInPolygon(ring: List<DoubleArray>): LongArray {
+        val core = h3 ?: return LongArray(0)
+        if (ring.size < 3) return LongArray(0)
+        val poly = ring.map { LatLng(it[0], it[1]) }
+        val all = try { core.polygonToCells(poly, emptyList(), RES) } catch (_: Throwable) { return LongArray(0) }
+        val locked = cells ?: return all.toLongArray()
+        val out = ArrayList<Long>(all.size)
+        for (c in all) if (Arrays.binarySearch(locked, c) < 0) out.add(c)
+        return out.toLongArray()
+    }
+
+    /**
+     * GARANȚIA „între zone": celulele din bbox care sunt ÎNCĂ blocate dar au ≥ `minUnlockedNeighbors`
+     * vecini deblocați = găuri izolate (cusături între județe deja acoperite, slivere de digitizare,
+     * reziduuri ratate). Scoped la bbox (costul ∝ celule din bbox, nu tot setul deblocat al țării) →
+     * rulat ca backstop după fiecare județ. Întoarce INDECȘII de celulă (reutilizabili de cleanup). [] fail-safe.
+     */
+    fun lockedIsolatedCellsInBbox(latMin: Double, latMax: Double, lonMin: Double, lonMax: Double,
+                                  minUnlockedNeighbors: Int = 4): LongArray {
+        val core = h3 ?: return LongArray(0)
+        val locked = cells ?: return LongArray(0)
+        val ring = listOf(
+            LatLng(latMin, lonMin), LatLng(latMin, lonMax),
+            LatLng(latMax, lonMax), LatLng(latMax, lonMin)
+        )
+        val all = try { core.polygonToCells(ring, emptyList(), RES) } catch (_: Throwable) { return LongArray(0) }
+        val out = ArrayList<Long>()
+        for (c in all) {
+            if (Arrays.binarySearch(locked, c) >= 0) continue        // deja deblocată
+            val disk = try { core.gridDisk(c, 1) } catch (_: Throwable) { continue }
+            var u = 0
+            for (n in disk) if (n != c && Arrays.binarySearch(locked, n) >= 0) u++
+            if (u >= minUnlockedNeighbors) out.add(c)
+        }
+        return out.toLongArray()
+    }
+
+    /**
      * Câte din `expected` (celule blocate înainte de acoperire) apar ACUM în setul deblocat.
      * Se cheamă DUPĂ acoperire + refresh(). ratio = gainedAmong/expected.size = acoperirea reală.
      */

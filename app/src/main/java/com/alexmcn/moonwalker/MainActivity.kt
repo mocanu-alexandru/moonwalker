@@ -174,7 +174,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(MockService.EXTRA_POLY, poly)
         }
         startForegroundService(i)
-        toast("🤖 AUTO pornit: curăț găurile apropiate (nearest-first) → extind în pătrate → seek final")
+        toast("🤖 AUTO pornit: blast-radius în pătrate concentrice, județ cu județ (nearest-first) + backstop cusături")
     }
 
     /** Centrează harta pe ultima locație reală cunoscută (acasă). */

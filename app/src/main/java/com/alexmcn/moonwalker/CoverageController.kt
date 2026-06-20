@@ -46,7 +46,8 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
         private const val TARGET = 0.98       // acoperire-țintă: ~completă DINTR-O TRECERE (nu ~90% + reveniri)
         private const val HIGH = 0.995        // practic perfect → mai avem margine să lărgim agresiv
         private const val MIN_SAMPLE = 25     // sub atâtea celule așteptate, ratio e zgomot → nu adapta
-        private const val DEAD_LIMIT = 4      // blocuri la rând cu 0 deblocate (deși aveau) → pipeline mort
+        private const val DEAD_LIMIT = 4      // unități la rând cu 0 deblocate (deși aveau) → pipeline mort
+        private const val DEAD_BIG_SAMPLE = 1000  // o singură unitate cu atâtea celule și 0 deblocate = mort SIGUR
         private const val EMA_A = 0.45
     }
 
@@ -106,11 +107,14 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
         lastRatio = ratio
         ema = if (ema < 0) ratio else EMA_A * ratio + (1 - EMA_A) * ema   // doar pt. afișare (trend)
 
-        // detectare pipeline mort: deblocare ZERO deși aveam celule de deblocat
+        // detectare pipeline mort: deblocare ZERO deși aveam celule de deblocat.
+        // Cu măsurarea per JUDEȚ (eșantioane mari, rare), așteptarea a DEAD_LIMIT unități ar însemna
+        // ore-zile de „acoperire" fără deblocare. Deci: o SINGURĂ unitate mare (≥ DEAD_BIG_SAMPLE celule)
+        // cu 0 deblocate = mort SIGUR (nu zgomot) → trip imediat. Streak-ul rămâne pt. unități mici/ambigue.
         if (gained == 0) deadStreak++ else deadStreak = 0
-        if (deadStreak >= DEAD_LIMIT) {
+        if ((gained == 0 && expected >= DEAD_BIG_SAMPLE) || deadStreak >= DEAD_LIMIT) {
             return Outcome(ratio, dead = true, sampled = true,
-                status = "PIPELINE MORT: 0 deblocate × $deadStreak blocuri — verifică Xposed/root")
+                status = "PIPELINE MORT: 0 deblocate din %d celule — verifică Xposed/root".format(expected))
         }
 
         // Hill-climbing pe coordonate: fiecare bloc e un probe la setări DIFERITE, deci decizia
