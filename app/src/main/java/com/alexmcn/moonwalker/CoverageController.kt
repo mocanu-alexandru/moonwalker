@@ -15,10 +15,12 @@ import android.content.Context
  * nu mai trebuie „să se întoarcă". Cu cât lasă mai multe hexagoane nedescoperite, cu atât se
  * îndesește mai agresiv (pull ∝ deficit) ca să le prindă pe toate la trecerea următoare.
  *
- * METODĂ: hill-climbing pe coordonate (probează alternativ rowM apoi stepM). Fiecare bloc e
- * un „probe": crește un knob, acoperă, măsoară. Dacă ratio se ține ≥ TARGET → acceptă (baza urcă,
- * knob mai agresiv). Dacă ratio scade → respinge și TRAGE ÎNAPOI (mai dens) proporțional cu câte
- * hexagoane a ratat. Bazele bune se persistă, deci botul pornește data viitoare de unde a învățat.
+ * METODĂ: hill-climbing pe `stepM` (singura pârghie reală în AUTO — vezi nextParams). Fiecare bandă e
+ * un „probe": crește stepM (= viteză mai mare + interpolare mai rară), acoperă, măsoară. Dacă ratio se
+ * ține ≥ TARGET → acceptă (baza urcă, probe mai agresiv). Dacă ratio scade → respinge și TRAGE ÎNAPOI
+ * (mai dens) proporțional cu câte hexagoane a ratat → descoperă empiric plafonul de viteză al Bump.
+ * Bazele bune se persistă, deci botul pornește data viitoare de unde a învățat. (`rowM` nu se mai
+ * probează: driveCells/cleanup conduc cell-by-cell pe stepM, nu pe rânduri.)
  *
  * SEMNAL: `record()` primește acoperirea REALĂ a pasajului RAPID (înainte de cleanup) → învață pe
  * acoperirea de-o-trecere, nu pe 100%-ul post-cleanup. DEAD: dacă N blocuri la rând deblochează ZERO
@@ -52,12 +54,12 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
     }
 
     // baza acceptată (cele mai bune setări confirmate) — punct de plecare pt. fiecare probe
-    private var baseRow: Double
+    private var baseRow: Double        // FIX în AUTO: `rowM` NU mai e folosit la condus (driveCells/cleanup
+                                       // merg cell-by-cell pe `stepM`+viteză, partitionBands pe BAND_M).
+                                       // Rămâne doar pt. afișaj/areaRate; tuner-ul nu-l mai probează.
     private var baseStep: Double
-    // pașii de probe (se micșorează la eșec, cresc la succes susținut)
-    private var rowProbe = 10.0
+    // pasul de probe pt. stepM (se micșorează la eșec, crește la succes susținut)
     private var stepProbe = 4.0
-    private var probeKnob = 0          // 0 = probează rowM, 1 = probează stepM
     private var lastCandidate: Params
 
     // cea mai bună combinație fezabilă văzută (ratio ≥ TARGET) cu cea mai mare area rate
@@ -77,11 +79,15 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
         lastCandidate = Params(baseRow, baseStep, tickHz)
     }
 
-    /** Setările pentru următorul bloc NORMAL — baza + un probe (lărgire) pe knob-ul curent. */
+    /**
+     * Setările pentru următoarea bandă — baza + un probe (lărgire) pe `stepM` (singura pârghie reală în
+     * AUTO: viteză = stepM×tickHz și densitatea de fix-uri pe celulă). Creșterea lui stepM ridică viteza
+     * (și rărește interpolarea) → când depășește poarta Bump, ratio se prăbușește și `record()` trage
+     * înapoi → tuner-ul descoperă empiric plafonul de viteză. `rowM` rămâne fix (nu se mai probează).
+     */
     fun nextParams(): Params {
-        val candRow  = if (probeKnob == 0) (baseRow + rowProbe).coerceAtMost(ROW_MAX) else baseRow
-        val candStep = if (probeKnob == 1) (baseStep + stepProbe).coerceAtMost(STEP_MAX) else baseStep
-        lastCandidate = Params(candRow, candStep, tickHz)
+        val candStep = (baseStep + stepProbe).coerceAtMost(STEP_MAX)
+        lastCandidate = Params(baseRow, candStep, tickHz)
         return lastCandidate
     }
 
@@ -122,29 +128,20 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
         // la setări diferite și ar accepta un candidat prost când istoricul recent e bun).
         val cand = lastCandidate
         if (ratio >= TARGET) {
-            // candidatul ține acoperirea → acceptă-l ca bază nouă
-            baseRow = cand.rowM; baseStep = cand.stepM
-            if (ratio >= HIGH) {         // margine mare → probe mai agresiv data viitoare
-                if (probeKnob == 0) rowProbe = (rowProbe * 1.3).coerceAtMost(20.0)
-                else                stepProbe = (stepProbe * 1.3).coerceAtMost(8.0)
-            }
+            // candidatul (stepM lărgit) ține acoperirea → acceptă-l ca bază nouă
+            baseStep = cand.stepM
+            if (ratio >= HIGH) stepProbe = (stepProbe * 1.3).coerceAtMost(8.0)   // margine mare → probe mai agresiv
             // memorează cea mai bună combinație fezabilă (area rate maxim)
             if (cand.areaRate > bestRate) { bestRate = cand.areaRate; bestRow = cand.rowM; bestStep = cand.stepM }
         } else {
-            // Candidatul a lăsat hexagoane nedescoperite → respinge și ÎNDESEȘTE proporțional cu
-            // DEFICITUL (câte a ratat): puține ratări → corecție mică; multe → trage tare înapoi, ca
-            // trecerea următoare să le prindă pe TOATE dintr-o dată (fără reveniri).
+            // stepM prea mare a lăsat hexagoane nedescoperite (viteză peste poartă / interpolare prea rară)
+            // → respinge și ÎNDESEȘTE proporțional cu DEFICITUL (câte a ratat), ca trecerea următoare să le
+            // prindă pe TOATE dintr-o dată (fără reveniri).
             val shortfall = (TARGET - ratio).coerceIn(0.0, TARGET)
             val pull = 0.5 + shortfall / TARGET * 3.0   // 0.5 (abia sub țintă) … ~3.5 (acoperire slabă)
-            if (probeKnob == 0) {
-                baseRow = (baseRow - rowProbe * pull).coerceIn(ROW_MIN, ROW_MAX)
-                rowProbe = (rowProbe * 0.5).coerceAtLeast(3.0)
-            } else {
-                baseStep = (baseStep - stepProbe * pull).coerceIn(STEP_MIN, STEP_MAX)
-                stepProbe = (stepProbe * 0.5).coerceAtLeast(2.0)
-            }
+            baseStep = (baseStep - stepProbe * pull).coerceIn(STEP_MIN, STEP_MAX)
+            stepProbe = (stepProbe * 0.5).coerceAtLeast(2.0)
         }
-        probeKnob = probeKnob xor 1   // alternează knob-ul probat
         persist()
 
         val best = Params(bestRow, bestStep, tickHz)

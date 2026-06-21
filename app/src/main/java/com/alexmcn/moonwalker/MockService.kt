@@ -90,6 +90,8 @@ class MockService : Service() {
     @Volatile private var lastMoveMs = 0L
     private var wpLat = Double.NaN; private var wpLon = Double.NaN
     @Volatile private var autoBlockN = 0   // blocul curent din spirală (pt. loop-guard-ul restart-ului)
+    @Volatile private var cleanupActive = false   // cleanup pe un cluster strâns (lovituri staționare) → poziția
+                                                  // stă legitim în <STUCK_RADIUS → watcher-ul NU trebuie să dea restart fals
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -576,26 +578,31 @@ class MockService : Service() {
     ): DoubleArray? {
         var prev = prev0
         var pass = 0
-        // Masca e deja proaspătă (refresh din apelant pt. record) → primul pasaj folosește starea curentă.
-        while (!stopFlag && pass < CLEANUP_MAX_PASSES) {
-            val centers = UnlockedMask.stillLockedCenters(expected)
-            if (centers.isEmpty()) { statusText = "AUTO • bloc %d ✓ 100%%".format(blockN); break }
-            val ordered = orderLawnmower(centers)
-            for ((idx, h) in ordered.withIndex()) {
-                if (stopFlag) break
-                if (idx % 16 == 0) renewWakelock()
-                prev = drive(prev ?: h, h, tickMs, speedKmh, stepM,
-                    "AUTO • bloc %d • umplu găuri %d/%d (pas %d)".format(blockN, idx + 1, ordered.size, pass + 1))
-                // „lovește" celula: câteva fix-uri staționare pe centru ca Bump s-o înregistreze sigur
-                repeat(SEEK_HITS) {
-                    if (!stopFlag) { pushLocation(h[0], h[1], 0.0); try { Thread.sleep(tickMs) } catch (_: InterruptedException) {} }
+        // Lovituri staționare pe un cluster strâns → poziția stă legitim în <STUCK_RADIUS. Suspendă
+        // detecția „blocat" a watcher-ului cât timp curățăm (altfel un cleanup lung = restart fals).
+        cleanupActive = true
+        try {
+            // Masca e deja proaspătă (refresh din apelant pt. record) → primul pasaj folosește starea curentă.
+            while (!stopFlag && pass < CLEANUP_MAX_PASSES) {
+                val centers = UnlockedMask.stillLockedCenters(expected)
+                if (centers.isEmpty()) { statusText = "AUTO • bloc %d ✓ 100%%".format(blockN); break }
+                val ordered = orderLawnmower(centers)
+                for ((idx, h) in ordered.withIndex()) {
+                    if (stopFlag) break
+                    if (idx % 16 == 0) renewWakelock()
+                    prev = drive(prev ?: h, h, tickMs, speedKmh, stepM,
+                        "AUTO • bloc %d • umplu găuri %d/%d (pas %d)".format(blockN, idx + 1, ordered.size, pass + 1))
+                    // „lovește" celula: câteva fix-uri staționare pe centru ca Bump s-o înregistreze sigur
+                    repeat(SEEK_HITS) {
+                        if (!stopFlag) { pushLocation(h[0], h[1], 0.0); try { Thread.sleep(tickMs) } catch (_: InterruptedException) {} }
+                    }
                 }
+                // Settle + re-măsoară: găurile lovite dispar din mască → pasajul următor țintește doar ce-a rămas.
+                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                if (!UnlockedMask.refresh(applicationContext)) break   // fără măsurătoare validă → ieși (fail-safe)
+                pass++
             }
-            // Settle + re-măsoară: găurile lovite dispar din mască → pasajul următor țintește doar ce-a rămas.
-            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
-            if (!UnlockedMask.refresh(applicationContext)) break   // fără măsurătoare validă → ieși (fail-safe)
-            pass++
-        }
+        } finally { cleanupActive = false }
         return prev
     }
 
@@ -736,9 +743,12 @@ class MockService : Service() {
                     lastProgressMs = nowMs
                 }
                 // (2) BLOCAT ÎN ZONĂ: injectează, dar poziția nu iese din rază de mult timp (thread agățat,
-                // lovituri staționare la nesfârșit etc.) → restart AUTO (doar în mod autonom).
+                // lovituri staționare la nesfârșit etc.) → restart AUTO (doar în mod autonom). NU în timpul
+                // cleanup-ului: acolo lovim staționar un cluster strâns → e progres legitim, nu blocaj.
                 val lat = curLat; val lon = curLon
-                if (lat != 0.0 || lon != 0.0) {
+                if (cleanupActive) {
+                    wpLat = lat; wpLon = lon; lastMoveMs = nowMs   // resetează fereastra → fără restart fals
+                } else if (lat != 0.0 || lon != 0.0) {
                     if (wpLat.isNaN() ||
                         RouteGenerator.haversine(doubleArrayOf(wpLat, wpLon), doubleArrayOf(lat, lon)) > STUCK_RADIUS_M) {
                         wpLat = lat; wpLon = lon; lastMoveMs = nowMs   // s-a mișcat real → resetează fereastra
