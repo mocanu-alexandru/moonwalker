@@ -37,9 +37,7 @@ class MockService : Service() {
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
-        private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → benzi concentrice (blast); sub = benzi de latitudine
-        private const val BAND_M = 3000.0                // grosimea unei benzi de lucru (măsoară+tunează+cleanup per bandă → garanție 100% progresivă, nu la sfârșit de județ)
-        private const val NEAREST_MAX_N = 4000            // peste atâtea celule, nearest-neighbor O(N²) la ordonare devine scump → cad pe lawnmower (benzile PROASPETE folosesc oricum orderRingSnake)
+        private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
         // VITEZĂ sau de DWELL (fix-uri/celulă)? — pe câteva petice mici proaspete, apoi aplică tickHz+pas sigure.
         private const val CALIB_TRIALS = 7                // câte configurări testăm (1 control + 1 dwell + 5 viteze)
@@ -329,19 +327,19 @@ class MockService : Service() {
     }
 
     /**
-     * MOD AUTONOM pe JUDEȚE cu BENZI: descoperă JUDEȚ cu JUDEȚ (nearest-first din primul fix GPS),
-     * iar fiecare județ pe BENZI de lucru (~BAND_M) cu GARANȚIE 100% PROGRESIVĂ + BACKSTOP de cusătură.
-     * Fără spirala de blocuri (fără inset → fără cusături interne → fără faza globală de seek).
+     * MOD AUTONOM „BLAST RADIUS pe JUDEȚE": descoperă în PĂTRATE CONCENTRICE tot mai mari din primul fix
+     * GPS, JUDEȚ cu JUDEȚ (nearest-first), cu GARANȚIE 100% pe celulele fiecărui județ + BACKSTOP de
+     * cusătură. O singură undă continuă din centru spre margine (FĂRĂ benzi → fără frânat/cleanup la
+     * fiecare 3 km, fără întoarceri care lasă goluri): cel mai rapid mod de a acoperi toată suprafața.
      *
      * Pt. fiecare județ, în ordine nearest-first din origine:
      *   1. măsoară celulele ÎNCĂ blocate din POLIGONUL județului (`expected`);
-     *   2. împarte în BENZI (`partitionBands`): concentrice L∞ din centru dacă e PROASPĂT (blast-radius =
-     *      completare radiind), benzi de latitudine dacă e PARȚIAL. Pt. FIECARE bandă, în ordine:
-     *      (a) baleiere DIRECTĂ prin centrele celulelor (`driveCells`, deterministă, fără overlap);
-     *      (b) settle → re-măsoară → AUTO-TUNING (feedback DES → tuner converge, dead-pipeline prins repede);
-     *      (c) GARANȚIE 100% pe banda asta (cleanup determinist) ÎNAINTE de banda următoare → zona din
-     *          urma frontului e mereu completă (nu goluri acumulate zile întregi până la sfârșit de județ);
-     *   3. BACKSTOP cusături: găuri izolate din bbox-ul județului (orfani de graniță / slivere) → țintite.
+     *   2. baleiere: PROASPĂT (≥ FRESH_LOCKED_FRACTION blocat) → `coverRings` (pătrate concentrice din
+     *      centru, RingSpiralGenerator, clip la poligon, sare deblocatele); PARȚIAL → `coverLockedDirect`
+     *      (serpentină doar peste celulele blocate, fără traversat tot golul deblocat al județului);
+     *   3. settle → re-măsoară → AUTO-TUNING o dată per JUDEȚ (pe pasajul rapid, înainte de cleanup);
+     *   4. GARANȚIE 100%: țintește direct fiecare celulă rămasă blocată (`cleanupBlockToFull`, determinist);
+     *   5. BACKSTOP cusături: găuri izolate din bbox-ul județului (orfani de graniță / slivere) → țintite.
      * Reia de la județul neterminat (AutoState.countyIndex). Originea persistată → ordine deterministă.
      */
     private fun runAutoCounties(origin0: DoubleArray?, tickHz: Int) {
@@ -392,27 +390,28 @@ class MockService : Service() {
                     AutoState.saveCounty(applicationContext, origin[0], origin[1], ci + 1); ci++; continue
                 }
 
-                // (2) ÎMPARTE județul în BENZI de lucru (~BAND_M): concentrice inner→outer dacă e PROASPĂT
-                // (blast-radius = completare radiind din centru), benzi de latitudine dacă e PARȚIAL.
-                // GARANȚIE 100% PROGRESIVĂ: fiecare bandă e baleiată → măsurată → tunată → curățată la 100%
-                // ÎNAINTE de următoarea → zona din urma frontului e mereu completă (nu goluri zile întregi),
-                // tuner-ul primește feedback des (converge), dead-pipeline se prinde repede (per bandă).
-                val fresh = expected.size >= FRESH_LOCKED_FRACTION * polygonCellCapacity(poly, zone)
-                val cen = if (ci == 0) origin else centroid(poly)
-                val bands = partitionBands(expected, fresh, cen)
-                var deadAbort = false
-                for ((bi, band) in bands.withIndex()) {
-                    if (stopFlag) break
-                    if (band.isEmpty()) continue
-                    renewWakelock()
-                    val p = ctrl.nextParams()
-                    // (a) baleiere DIRECTĂ prin centrele celulelor benzii (deterministă, fără overlap)
-                    prev = driveCells(band, p, fresh, cen, prev,
-                        "AUTO • %s (%d/%d) • bandă %d/%d".format(name, ci + 1, counties.size, bi + 1, bands.size))
-                    // (b) settle → re-măsoară → auto-tuning (pe pasajul rapid al benzii)
-                    try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
-                    if (!UnlockedMask.refresh(applicationContext)) continue   // fără măsurătoare → next bandă
-                    val oc = ctrl.record(band.size, UnlockedMask.gainedAmong(band))
+                // (2) BALEIERE în PĂTRATE CONCENTRICE din centru (blast-radius CONTINUU — o singură undă din
+                // mijloc spre margine, fără benzi/frânat). PROASPĂT (≥ FRESH_LOCKED_FRACTION blocat) →
+                // `coverRings` (RingSpiralGenerator). PARȚIAL → `coverLockedDirect` (serpentină doar peste
+                // celulele blocate, fără traversat tot golul). Centru: jud. de ACASĂ (ci==0) → originea GPS;
+                // restul → centroidul (inelele pornesc din interiorul județului, nu din `prev` aflat departe).
+                val p = ctrl.nextParams()
+                val lockedFraction = expected.size / max(1.0, polygonCellCapacity(poly, zone))
+                prev = if (lockedFraction >= FRESH_LOCKED_FRACTION) {
+                    val center = if (ci == 0) origin else centroid(poly)
+                    coverRings(zone, center[0], center[1], p, prev,
+                        "AUTO • %s (%d/%d) • blast %.0fm/%.0fkm/h".format(name, ci + 1, counties.size, p.rowM, p.speedKmh))
+                } else {
+                    coverLockedDirect(expected, p, prev,
+                        "AUTO • %s (%d/%d) • țintit %.0f%% blocat".format(name, ci + 1, counties.size, lockedFraction * 100))
+                }
+
+                // (3) settle → re-măsoară → AUTO-TUNING o dată per JUDEȚ (pe pasajul RAPID, înainte de cleanup)
+                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                if (!UnlockedMask.refresh(applicationContext)) {
+                    statusText = "AUTO • %s acoperit (măsurare indisponibilă)".format(name)
+                } else {
+                    val oc = ctrl.record(expected.size, UnlockedMask.gainedAmong(expected))
                     if (oc.dead) {
                         // PLASĂ calibrare: calibrarea tocmai a dovedit pipeline-ul VIU (a deblocat petice),
                         // deci un „dead" acum = viteză prea agresivă, nu pipeline mort. Revino la soft-spot
@@ -425,24 +424,21 @@ class MockService : Service() {
                             calibReverted = true
                             statusText = "⚠ calibrare prea agresivă → revin la soft-spot (≈540 km/h)"; updateNotif(statusText)
                             UnlockedMask.refresh(applicationContext)
-                            deadAbort = true; break   // ci neschimbat → reia județul la viteză sigură
+                            continue   // ci neschimbat → reia județul la viteză sigură
                         }
-                        // NU renunța (autonomie): alertă + back-off + self-heal, apoi REIA județul.
+                        // NU renunța (autonomie): alertă + back-off + self-heal, apoi REIA același județ.
                         statusText = "⚠ ${oc.status} — reîncerc în 60s"; updateNotif(statusText)
                         reacquireProviders()
                         try { Thread.sleep(DEAD_BACKOFF_MS) } catch (_: InterruptedException) {}
                         UnlockedMask.refresh(applicationContext); ctrl.resetDead()
-                        deadAbort = true; break
+                        continue   // ci neschimbat → reîncearcă județul
                     }
-                    statusText = "AUTO • %s • bandă %d/%d • %s".format(name, bi + 1, bands.size, oc.status)
-                    // (c) GARANȚIE 100% pe celulele benzii (cleanup determinist, înainte de banda următoare)
+                    statusText = "AUTO • %s • %s".format(name, oc.status)
+                    // (4) GARANȚIE 100% pe celulele județului + (5) BACKSTOP cusături „între zone"
                     val sp = ctrl.safeParams()
-                    prev = cleanupBlockToFull(band, prev, 1000L / sp.tickHz, sp.speedKmh, sp.stepM, ci + 1)
-                    AutoState.saveCounty(applicationContext, origin[0], origin[1], ci)   // checkpoint în județ
+                    prev = cleanupBlockToFull(expected, prev, 1000L / sp.tickHz, sp.speedKmh, sp.stepM, ci + 1)
+                    prev = cleanupSeams(zone, prev, sp, ci + 1)
                 }
-                if (deadAbort) continue   // ci neschimbat → reîncearcă județul (band re-măsurat sare ce-i gata)
-                // (3) BACKSTOP cusături „între zone" (orfani de graniță / slivere), o dată per județ
-                prev = cleanupSeams(zone, prev, ctrl.safeParams(), ci + 1)
                 AutoState.saveCounty(applicationContext, origin[0], origin[1], ci + 1)
             } catch (e: Exception) {
                 android.util.Log.w("MockService", "AUTO județ $name eroare: ${e.message}")
@@ -496,54 +492,42 @@ class MockService : Service() {
     }
 
     /**
-     * Împarte celulele `expected` în BENZI de lucru (~BAND_M grosime), ordonate pt. procesare:
-     *  • PROASPĂT → benzi CONCENTRICE L∞ din `cen` (inner→outer) = blast-radius (completare radiind);
-     *  • PARȚIAL → benzi de LATITUDINE (sud→nord) = serpentină locală peste petice.
-     * Fiecare bandă e procesată separat (baleiere+măsură+tuning+cleanup) → garanție 100% progresivă +
-     * feedback des pt. tuner. Centrele aliniate pe index (cellCentersAligned) ca să poată bina corect.
+     * Acoperă un județ cu pattern-ul BLAST RADIUS — PĂTRATE CONCENTRICE tot mai mari din `(cLat,cLon)`,
+     * clipate la poligon, sărind deblocatele (RingSpiralGenerator). O singură undă continuă din centru
+     * spre margine → drumul radiază din punctul tău, deblochezi întâi ce-i lângă tine. Întoarce ultima
+     * poziție (continuitate fizică).
+     *
+     * TOT (inclusiv salturile peste goluri deblocate / arce non-poligon) e condus la `p.speedKmh` = viteza
+     * de acoperire pe care TUNER-ul a găsit-o sigură (acceptată de Bump). NU folosim o viteză de conector
+     * fixă mai mare: ea ocolea limita tuner-ului → peste poarta Bump → poziții respinse ca „warp" → 0
+     * deblocări. `drive` interpolează la stepM, deci golurile rămân traversate continuu (fără teleport).
      */
-    private fun partitionBands(expected: LongArray, fresh: Boolean, cen: DoubleArray): List<LongArray> {
-        val centers = UnlockedMask.cellCentersAligned(expected)
-        val mLat = 111_320.0
-        val kLon = mLat * cos(Math.toRadians(cen[0]))
-        val byBand = java.util.TreeMap<Int, MutableList<Long>>()   // sortat ascendent = ordinea de procesare
-        for (i in expected.indices) {
-            val c = centers[i] ?: continue
-            val b = if (fresh) {
-                val dN = abs(c[0] - cen[0]) * mLat
-                val dE = abs(c[1] - cen[1]) * kLon
-                (max(dN, dE) / BAND_M).toInt()                     // inel L∞ (blast)
-            } else {
-                floor((c[0] - cen[0]) * mLat / BAND_M).toInt()     // bandă de latitudine (semnată)
-            }
-            byBand.getOrPut(b) { ArrayList() }.add(expected[i])
+    private fun coverRings(zone: Zone, cLat: Double, cLon: Double, p: CoverageController.Params,
+                           prev0: DoubleArray?, status: String): DoubleArray? {
+        val tickMs = 1000L / p.tickHz
+        val g = RingSpiralGenerator(zone, cLat, cLon, p.rowM, p.stepM, skipUnlocked = true)
+        var prev = prev0
+        var i = 0
+        var pt = g.next()
+        while (pt != null && !stopFlag) {
+            if (i++ % 64 == 0) renewWakelock()
+            prev = drive(prev ?: pt, pt, tickMs, p.speedKmh, p.stepM, status)
+            pt = g.next()
         }
-        return byBand.values.map { it.toLongArray() }
+        return prev
     }
 
     /**
-     * Baleiere DIRECTĂ prin centrele celulelor unei benzi, conduse CONTINUU la `p.speedKmh`. Fiecare
-     * celulă e un waypoint → atinsă deterministic (fără overlap, fără goluri statistice). Golurile reale
-     * (dacă un fix în mișcare nu ajunge) sunt prinse imediat de cleanup-ul benzii.
-     *
-     * ORDONAREA contează enorm pe ceas: o bandă PROASPĂTĂ e un INEL L∞ GOL pe interior (centrul a fost
-     * acoperit de inelele dinăuntru). Cu lawnmower (benzi de latitudine) un rând din mijlocul inelului are
-     * doar celula de pe marginea VEST și cea de pe EST → `drive` traversa tot golul din mijloc la viteza
-     * LENTĂ de acoperire, pt. fiecare rând al fiecărui inel (≈ încetinirea de 10× față de pătratele
-     * concentrice). FIX: pt. inele ordonăm PERIMETRAL (boustrophedon UNGHIULAR, `orderRingSnake`) → celule
-     * consecutive ADIACENTE (~mărimea celulei), fără traversarea golului, ca vechiul RingSpiralGenerator.
-     * Pt. benzi PARȚIALE (petice împrăștiate) → nearest-neighbor lacom (sau lawnmower dacă banda e mare,
-     * ca să nu plătim O(N²) la ordonare). Întoarce ultima poziție (continuitate fizică).
+     * Serpentină DIRECTĂ peste celulele blocate (rutare „doar prin nedeblocat", minim de deblocat
+     * traversat): centrele celulelor `expected` ordonate boustrophedon (benzi de latitudine, local) și
+     * conduse CONTINUU la `p.speedKmh` (NU fix-uri staționare — acoperim trecând prin ele). Pt. județe
+     * majoritar deblocate, unde inelele ar traversa toată lățimea județului ca să atingă câteva petice.
+     * Întoarce ultima poziție.
      */
-    private fun driveCells(band: LongArray, p: CoverageController.Params, fresh: Boolean, cen: DoubleArray,
-                           prev0: DoubleArray?, status: String): DoubleArray? {
+    private fun coverLockedDirect(expected: LongArray, p: CoverageController.Params,
+                                  prev0: DoubleArray?, status: String): DoubleArray? {
         val tickMs = 1000L / p.tickHz
-        val centers = UnlockedMask.cellsToCenters(band)
-        val ordered = when {
-            fresh -> orderRingSnake(centers, cen)
-            centers.size <= NEAREST_MAX_N -> orderNearestFirst(prev0, centers)
-            else -> orderLawnmower(centers)
-        }
+        val ordered = orderLawnmower(UnlockedMask.cellsToCenters(expected))
         var prev = prev0
         for ((idx, h) in ordered.withIndex()) {
             if (stopFlag) break
@@ -551,31 +535,6 @@ class MockService : Service() {
             prev = drive(prev ?: h, h, tickMs, p.speedKmh, p.stepM, status)
         }
         return prev
-    }
-
-    /**
-     * Ordonează celulele unui INEL L∞ pe PERIMETRU: boustrophedon UNGHIULAR în jurul lui `cen`. Cheia
-     * primară = sectorul unghiular (binArc ≈ o celulă la raza medie a benzii), secundară = raza, cu
-     * direcția alternată per sector → șarpe în jurul inelului fără reset radial. Celule consecutive rămân
-     * ADIACENTE (hop ≈ mărimea celulei), niciodată pe diametrul golului. O(N log N) — sigur pe benzi mari.
-     */
-    private fun orderRingSnake(centers: List<DoubleArray>, cen: DoubleArray): List<DoubleArray> {
-        if (centers.size <= 2) return centers
-        val mLat = 111_320.0
-        val kLon = mLat * cos(Math.toRadians(cen[0]))
-        // (θ, r) per celulă (planar, în metri din `cen`); rMean dimensionează sectorul unghiular.
-        val pol = centers.map { c ->
-            val dN = (c[0] - cen[0]) * mLat
-            val dE = (c[1] - cen[1]) * kLon
-            doubleArrayOf(atan2(dN, dE), hypot(dN, dE))
-        }
-        val rMean = (pol.sumOf { it[1] } / pol.size).coerceAtLeast(1.0)
-        val binAngle = (150.0 / rMean).coerceIn(1e-4, PI)   // arc ≈ 150 m (o celulă) la raza medie
-        val idx = centers.indices.sortedWith(compareBy(
-            { floor(pol[it][0] / binAngle).toInt() },
-            { val sec = floor(pol[it][0] / binAngle).toInt(); if (sec % 2 == 0) pol[it][1] else -pol[it][1] }
-        ))
-        return idx.map { centers[it] }
     }
 
     /** Estimează câte celule H3 res-10 încap în poligon (arie shoelace în metri / aria unei celule). */
@@ -641,7 +600,7 @@ class MockService : Service() {
             if (expected.size < CALIB_MIN) continue   // patch deja (cvasi) deblocat → fără eșantion valid
             val p = CoverageController.Params(75.0, tr.stepM, tr.tickHz)
             val speed = p.speedKmh
-            prev = driveCells(expected, p, true, cen, prev,
+            prev = coverLockedDirect(expected, p, prev,
                 "CALIBRARE %d/%d • %.0f km/h (%dHz)".format(i + 1, battery.size, speed, tr.tickHz))
             try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
             if (!UnlockedMask.refresh(applicationContext)) continue
