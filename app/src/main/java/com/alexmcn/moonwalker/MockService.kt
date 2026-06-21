@@ -39,6 +39,7 @@ class MockService : Service() {
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → benzi concentrice (blast); sub = benzi de latitudine
         private const val BAND_M = 3000.0                // grosimea unei benzi de lucru (măsoară+tunează+cleanup per bandă → garanție 100% progresivă, nu la sfârșit de județ)
+        private const val NEAREST_MAX_N = 4000            // peste atâtea celule, nearest-neighbor O(N²) la ordonare devine scump → cad pe lawnmower (benzile PROASPETE folosesc oricum orderRingSnake)
         private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
         private const val WAKELOCK_MS = 60 * 60 * 1000L  // timeout wakelock; reînnoit per bloc (renewWakelock)
         private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
@@ -379,7 +380,7 @@ class MockService : Service() {
                     renewWakelock()
                     val p = ctrl.nextParams()
                     // (a) baleiere DIRECTĂ prin centrele celulelor benzii (deterministă, fără overlap)
-                    prev = driveCells(band, p, prev,
+                    prev = driveCells(band, p, fresh, cen, prev,
                         "AUTO • %s (%d/%d) • bandă %d/%d".format(name, ci + 1, counties.size, bi + 1, bands.size))
                     // (b) settle → re-măsoară → auto-tuning (pe pasajul rapid al benzii)
                     try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
@@ -481,15 +482,28 @@ class MockService : Service() {
     }
 
     /**
-     * Baleiere DIRECTĂ prin centrele celulelor unei benzi: ordonate boustrophedon (orderLawnmower, local)
-     * și conduse CONTINUU la `p.speedKmh`. Fiecare celulă e un waypoint → atinsă deterministic (fără
-     * overlap, fără goluri statistice). Golurile reale (dacă un fix în mișcare nu ajunge) sunt prinse
-     * imediat de cleanup-ul benzii. Întoarce ultima poziție (continuitate fizică).
+     * Baleiere DIRECTĂ prin centrele celulelor unei benzi, conduse CONTINUU la `p.speedKmh`. Fiecare
+     * celulă e un waypoint → atinsă deterministic (fără overlap, fără goluri statistice). Golurile reale
+     * (dacă un fix în mișcare nu ajunge) sunt prinse imediat de cleanup-ul benzii.
+     *
+     * ORDONAREA contează enorm pe ceas: o bandă PROASPĂTĂ e un INEL L∞ GOL pe interior (centrul a fost
+     * acoperit de inelele dinăuntru). Cu lawnmower (benzi de latitudine) un rând din mijlocul inelului are
+     * doar celula de pe marginea VEST și cea de pe EST → `drive` traversa tot golul din mijloc la viteza
+     * LENTĂ de acoperire, pt. fiecare rând al fiecărui inel (≈ încetinirea de 10× față de pătratele
+     * concentrice). FIX: pt. inele ordonăm PERIMETRAL (boustrophedon UNGHIULAR, `orderRingSnake`) → celule
+     * consecutive ADIACENTE (~mărimea celulei), fără traversarea golului, ca vechiul RingSpiralGenerator.
+     * Pt. benzi PARȚIALE (petice împrăștiate) → nearest-neighbor lacom (sau lawnmower dacă banda e mare,
+     * ca să nu plătim O(N²) la ordonare). Întoarce ultima poziție (continuitate fizică).
      */
-    private fun driveCells(band: LongArray, p: CoverageController.Params,
+    private fun driveCells(band: LongArray, p: CoverageController.Params, fresh: Boolean, cen: DoubleArray,
                            prev0: DoubleArray?, status: String): DoubleArray? {
         val tickMs = 1000L / p.tickHz
-        val ordered = orderLawnmower(UnlockedMask.cellsToCenters(band))
+        val centers = UnlockedMask.cellsToCenters(band)
+        val ordered = when {
+            fresh -> orderRingSnake(centers, cen)
+            centers.size <= NEAREST_MAX_N -> orderNearestFirst(prev0, centers)
+            else -> orderLawnmower(centers)
+        }
         var prev = prev0
         for ((idx, h) in ordered.withIndex()) {
             if (stopFlag) break
@@ -497,6 +511,31 @@ class MockService : Service() {
             prev = drive(prev ?: h, h, tickMs, p.speedKmh, p.stepM, status)
         }
         return prev
+    }
+
+    /**
+     * Ordonează celulele unui INEL L∞ pe PERIMETRU: boustrophedon UNGHIULAR în jurul lui `cen`. Cheia
+     * primară = sectorul unghiular (binArc ≈ o celulă la raza medie a benzii), secundară = raza, cu
+     * direcția alternată per sector → șarpe în jurul inelului fără reset radial. Celule consecutive rămân
+     * ADIACENTE (hop ≈ mărimea celulei), niciodată pe diametrul golului. O(N log N) — sigur pe benzi mari.
+     */
+    private fun orderRingSnake(centers: List<DoubleArray>, cen: DoubleArray): List<DoubleArray> {
+        if (centers.size <= 2) return centers
+        val mLat = 111_320.0
+        val kLon = mLat * cos(Math.toRadians(cen[0]))
+        // (θ, r) per celulă (planar, în metri din `cen`); rMean dimensionează sectorul unghiular.
+        val pol = centers.map { c ->
+            val dN = (c[0] - cen[0]) * mLat
+            val dE = (c[1] - cen[1]) * kLon
+            doubleArrayOf(atan2(dN, dE), hypot(dN, dE))
+        }
+        val rMean = (pol.sumOf { it[1] } / pol.size).coerceAtLeast(1.0)
+        val binAngle = (150.0 / rMean).coerceIn(1e-4, PI)   // arc ≈ 150 m (o celulă) la raza medie
+        val idx = centers.indices.sortedWith(compareBy(
+            { floor(pol[it][0] / binAngle).toInt() },
+            { val sec = floor(pol[it][0] / binAngle).toInt(); if (sec % 2 == 0) pol[it][1] else -pol[it][1] }
+        ))
+        return idx.map { centers[it] }
     }
 
     /** Estimează câte celule H3 res-10 încap în poligon (arie shoelace în metri / aria unei celule). */
