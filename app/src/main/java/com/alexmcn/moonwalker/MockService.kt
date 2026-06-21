@@ -40,6 +40,13 @@ class MockService : Service() {
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → benzi concentrice (blast); sub = benzi de latitudine
         private const val BAND_M = 3000.0                // grosimea unei benzi de lucru (măsoară+tunează+cleanup per bandă → garanție 100% progresivă, nu la sfârșit de județ)
         private const val NEAREST_MAX_N = 4000            // peste atâtea celule, nearest-neighbor O(N²) la ordonare devine scump → cad pe lawnmower (benzile PROASPETE folosesc oricum orderRingSnake)
+        // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
+        // VITEZĂ sau de DWELL (fix-uri/celulă)? — pe câteva petice mici proaspete, apoi aplică tickHz+pas sigure.
+        private const val CALIB_TRIALS = 7                // câte configurări testăm (1 control + 1 dwell + 5 viteze)
+        private const val CALIB_MIN = 50                  // celule blocate minime într-un patch ca eșantionul să fie valid
+        private const val CALIB_PATCH_DEG = 0.013         // ~1.4 km latura unui patch de test
+        private const val CALIB_MAX_RING = 12             // câte inele de petice scanăm spre exterior până renunțăm
+        private const val CALIB_PASS = 0.95               // ratio sub care un config e considerat „peste poarta Bump"
         private const val SETTLE_MS = 3000L              // pauză înainte de citirea footprint-ului (Bump scrie cu mică întârziere)
         private const val WAKELOCK_MS = 60 * 60 * 1000L  // timeout wakelock; reînnoit per bloc (renewWakelock)
         private const val STALL_MS = 90_000L             // fără progres atâta timp → watchdog face self-heal
@@ -339,8 +346,29 @@ class MockService : Service() {
      */
     private fun runAutoCounties(origin0: DoubleArray?, tickHz: Int) {
         val origin = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
-        val ctrl = CoverageController(applicationContext, tickHz)
         UnlockedMask.refresh(applicationContext)
+
+        // CALIBRARE o dată per device (auto + aplicare): măsoară poarta Bump și fixează tickHz-ul efectiv +
+        // pasul-sămânță înainte de a porni acoperirea. La rulările următoare se încarcă valorile învățate.
+        val prefs = applicationContext.getSharedPreferences("mw_autotune", Context.MODE_PRIVATE)
+        var effTickHz = tickHz
+        if (!prefs.getBoolean("calib_done", false) && !stopFlag) {
+            val res = runCalibration(origin, tickHz)
+            if (res != null) {
+                effTickHz = res.tickHz
+                prefs.edit()
+                    .putBoolean("calib_done", true)
+                    .putInt("calib_tickhz", res.tickHz)
+                    .putFloat("step", res.stepM.toFloat())     // sămânță pt. tuner (baseStep)
+                    .putString("calib_verdict", res.verdict)
+                    .apply()
+                statusText = "CALIBRARE ✓ ${res.verdict}"; updateNotif(statusText)
+            }
+        } else {
+            effTickHz = prefs.getInt("calib_tickhz", tickHz)
+        }
+
+        val ctrl = CoverageController(applicationContext, effTickHz)
 
         val counties = orderCountiesNearestFirst(origin)
         if (counties.isEmpty()) { statusText = "AUTO: fără județe (Counties gol?)"; return }
@@ -552,6 +580,108 @@ class MockService : Service() {
             a2 += x1 * y2 - x2 * y1
         }
         return abs(a2) / 2.0 / H3_RES10_AREA_M2
+    }
+
+    private data class CalibResult(val tickHz: Int, val stepM: Double, val verdict: String)
+
+    /**
+     * CALIBRARE (o dată per device): măsoară EMPIRIC poarta Bump în loc s-o ghicim (vezi 4891e40 — 1080
+     * ghicit a dat 0 deblocări). Întrebarea-cheie: Bump e limitat de VITEZĂ sau de DWELL (câte fix-uri în
+     * celulă)? — arată identic la un punct, dar cer strategii opuse. Bateria, pe petice mici PROASPETE:
+     *   • CONTROL  (tickHz, pas 25 → ~540 km/h, ~5 fix/cel) vs DWELL (2×tickHz, pas 12.5 → ~540 km/h,
+     *     ~10 fix/cel): aceeași viteză, dublu fix-uri. DWELL >> CONTROL ⇒ limitat de fix-uri (tickHz e pârghia).
+     *   • SCAN VITEZĂ (pas 20 fix, tickHz crescător 8→20 ⇒ 576…1440 km/h, fix/cel ≈ const): cea mai mare
+     *     viteză cu ratio ≥ CALIB_PASS = poarta reală.
+     * Aplică (auto): tickHz + pas al celei mai rapide configurări care a trecut. Petice ratate rămân blocate
+     * → se acoperă normal după. Sigur prin design: o configurație „peste poartă" doar nu deblochează (nu strică).
+     * Întoarce null dacă nu găsește teren blocat de măsurat (reia data viitoare).
+     */
+    private fun runCalibration(origin: DoubleArray, baseTickHz: Int): CalibResult? {
+        statusText = "CALIBRARE: caut petice blocate…"; updateNotif(statusText)
+        val patches = findFreshPatches(origin, CALIB_TRIALS)
+        if (patches.size < 3) return null   // prea puțin teren blocat lângă origine → sări (reia data viitoare)
+
+        class Trial(val tickHz: Int, val stepM: Double, val tag: String)
+        val battery = listOf(
+            Trial(baseTickHz,     25.0,  "control"),   // ~540 km/h, ~5 fix/cel
+            Trial(baseTickHz * 2, 12.5,  "dwell"),     // ~540 km/h, ~10 fix/cel (test dwell)
+            Trial(8,  20.0, "v"), Trial(10, 20.0, "v"), Trial(13, 20.0, "v"),
+            Trial(16, 20.0, "v"), Trial(20, 20.0, "v") // scan viteză 576…1440 km/h, ~6.6 fix/cel const
+        ).take(patches.size)
+
+        var prev: DoubleArray? = origin
+        val res = ArrayList<Triple<Trial, Int, Int>>()   // trial, expected, gained
+        val safeTickMs = 1000L / baseTickHz
+        val safeSpeed = 25.0 * baseTickHz * 3.6
+        for ((i, tr) in battery.withIndex()) {
+            if (stopFlag) break
+            val b = patches[i]
+            val cen = doubleArrayOf((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0)
+            // transit SIGUR până la patch (viteza de bază, nu cea de test) → intrarea nu e warp-uită
+            prev = drive(prev ?: cen, cen, safeTickMs, safeSpeed, 25.0, "CALIBRARE: spre patch ${i + 1}")
+            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+            UnlockedMask.refresh(applicationContext)
+            val expected = UnlockedMask.lockedCellsInBbox(b[0], b[1], b[2], b[3])
+            if (expected.size < CALIB_MIN) continue   // patch deja (cvasi) deblocat → fără eșantion valid
+            val p = CoverageController.Params(75.0, tr.stepM, tr.tickHz)
+            val speed = p.speedKmh
+            prev = driveCells(expected, p, true, cen, prev,
+                "CALIBRARE %d/%d • %.0f km/h (%dHz)".format(i + 1, battery.size, speed, tr.tickHz))
+            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+            if (!UnlockedMask.refresh(applicationContext)) continue
+            val gained = UnlockedMask.gainedAmong(expected)
+            res.add(Triple(tr, expected.size, gained))
+            android.util.Log.i("MockService",
+                "CALIB %s tickHz=%d step=%.1f v=%.0f ratio=%.2f (%d/%d)".format(
+                    tr.tag, tr.tickHz, tr.stepM, speed, gained.toDouble() / expected.size, gained, expected.size))
+        }
+        // întoarcere SIGURĂ la origine: bucla de județe pornește cu prev=origine, deci poziția acceptată de
+        // Bump trebuie să FIE origine la final (altfel primul drive al județului ar fi un teleport = warp).
+        if (!stopFlag) drive(prev ?: origin, origin, safeTickMs, safeSpeed, 25.0, "CALIBRARE: revin la origine")
+        if (res.isEmpty()) return null
+
+        fun ratioOf(t: Triple<Trial, Int, Int>) = t.third.toDouble() / t.second
+        val ctrl = res.firstOrNull { it.first.tag == "control" }?.let { ratioOf(it) }
+        val dwell = res.firstOrNull { it.first.tag == "dwell" }?.let { ratioOf(it) }
+        val dwellLimited = ctrl != null && dwell != null && dwell - ctrl > 0.05 && ctrl < 0.95
+        // alege configul cu VITEZA max care încă trece (ratio ≥ CALIB_PASS); dacă niciunul nu trece, cel mai bun ratio
+        val passing = res.filter { ratioOf(it) >= CALIB_PASS }
+        val best = passing.maxByOrNull { it.first.stepM * it.first.tickHz }
+            ?: res.maxByOrNull { ratioOf(it) }!!
+        val gateKmh = best.first.stepM * best.first.tickHz * 3.6
+        val verdict = "%s • poartă≈%.0f km/h (tickHz=%d, pas=%.0fm)".format(
+            if (dwellLimited) "DWELL-limit" else "VITEZĂ-limit", gateKmh, best.first.tickHz, best.first.stepM)
+        android.util.Log.i("MockService", "CALIB VERDICT: $verdict")
+        return CalibResult(best.first.tickHz, best.first.stepM, verdict)
+    }
+
+    /**
+     * Găsește până la `count` petice (bbox ~CALIB_PATCH_DEG) cu ≥ CALIB_MIN celule ÎNCĂ blocate, scanând în
+     * inele L∞ tot mai mari din origine (cele de lângă casă sunt deblocate → sărite automat). Petice spațiate
+     * (pas = 2× latura) ca să nu se suprapună → fiecare trial are eșantion proaspăt. Fail-safe: listă scurtă.
+     */
+    private fun findFreshPatches(origin: DoubleArray, count: Int): List<DoubleArray> {
+        val half = CALIB_PATCH_DEG / 2.0
+        val cosLat = cos(Math.toRadians(origin[0])).coerceAtLeast(0.1)
+        val stepLat = CALIB_PATCH_DEG * 2.0
+        val stepLon = stepLat / cosLat
+        val lonHalf = half / cosLat
+        val out = ArrayList<DoubleArray>()
+        var r = 0
+        while (out.size < count && r <= CALIB_MAX_RING && !stopFlag) {
+            for (dy in -r..r) for (dx in -r..r) {
+                if (max(abs(dy), abs(dx)) != r) continue   // doar perimetrul inelului
+                val latC = origin[0] + dy * stepLat
+                val lonC = origin[1] + dx * stepLon
+                val bbox = doubleArrayOf(latC - half, latC + half, lonC - lonHalf, lonC + lonHalf)
+                if (UnlockedMask.lockedCellsInBbox(bbox[0], bbox[1], bbox[2], bbox[3]).size >= CALIB_MIN) {
+                    out.add(bbox)
+                    if (out.size >= count) return out
+                }
+            }
+            r++
+        }
+        return out
     }
 
     /**
