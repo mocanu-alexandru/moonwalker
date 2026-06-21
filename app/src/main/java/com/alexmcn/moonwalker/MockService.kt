@@ -348,27 +348,23 @@ class MockService : Service() {
         val origin = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
         UnlockedMask.refresh(applicationContext)
 
-        // CALIBRARE o dată per device (auto + aplicare): măsoară poarta Bump și fixează tickHz-ul efectiv +
-        // pasul-sămânță înainte de a porni acoperirea. La rulările următoare se încarcă valorile învățate.
+        // CALIBRARE o dată per device (auto + aplicare CONSERVATOARE): măsoară poarta Bump și seedează DOAR
+        // pasul tuner-ului (nu tickHz → podeaua rămâne sub 540, mereu recuperabil). Persistat în mw_autotune
+        // (`step` = sămânță citită de CoverageController la init). Plasă: dead pe calibrare → revin la soft-spot.
         val prefs = applicationContext.getSharedPreferences("mw_autotune", Context.MODE_PRIVATE)
-        var effTickHz = tickHz
         if (!prefs.getBoolean("calib_done", false) && !stopFlag) {
             val res = runCalibration(origin, tickHz)
             if (res != null) {
-                effTickHz = res.tickHz
                 prefs.edit()
                     .putBoolean("calib_done", true)
-                    .putInt("calib_tickhz", res.tickHz)
-                    .putFloat("step", res.stepM.toFloat())     // sămânță pt. tuner (baseStep)
+                    .putFloat("step", res.seedStep.toFloat())     // sămânță pt. tuner (baseStep)
                     .putString("calib_verdict", res.verdict)
                     .apply()
                 statusText = "CALIBRARE ✓ ${res.verdict}"; updateNotif(statusText)
             }
-        } else {
-            effTickHz = prefs.getInt("calib_tickhz", tickHz)
         }
 
-        val ctrl = CoverageController(applicationContext, effTickHz)
+        val ctrl = CoverageController(applicationContext, tickHz)
 
         val counties = orderCountiesNearestFirst(origin)
         if (counties.isEmpty()) { statusText = "AUTO: fără județe (Counties gol?)"; return }
@@ -380,6 +376,7 @@ class MockService : Service() {
 
         var prev: DoubleArray? = origin
         var ci = startIdx
+        var calibReverted = false   // plasă: primul „dead" cât e calibrarea aplicată ⇒ viteză prea mare, nu pipeline mort
         while (ci < counties.size && !stopFlag) {
             val name = counties[ci]
             val poly = Counties.polygon(name)
@@ -417,6 +414,19 @@ class MockService : Service() {
                     if (!UnlockedMask.refresh(applicationContext)) continue   // fără măsurătoare → next bandă
                     val oc = ctrl.record(band.size, UnlockedMask.gainedAmong(band))
                     if (oc.dead) {
+                        // PLASĂ calibrare: calibrarea tocmai a dovedit pipeline-ul VIU (a deblocat petice),
+                        // deci un „dead" acum = viteză prea agresivă, nu pipeline mort. Revino la soft-spot
+                        // (≈540), șterge calibrarea, reia județul curat. Doar dacă și soft-spot-ul moare după
+                        // → e pipeline mort real (alerta de mai jos). (Și pe RESUME: o calibrare persistată
+                        // proastă se autocorectează la fel.)
+                        if (!calibReverted && prefs.getBoolean("calib_done", false)) {
+                            ctrl.resetToSoftSpot()
+                            prefs.edit().putBoolean("calib_done", false).remove("calib_verdict").apply()
+                            calibReverted = true
+                            statusText = "⚠ calibrare prea agresivă → revin la soft-spot (≈540 km/h)"; updateNotif(statusText)
+                            UnlockedMask.refresh(applicationContext)
+                            deadAbort = true; break   // ci neschimbat → reia județul la viteză sigură
+                        }
                         // NU renunța (autonomie): alertă + back-off + self-heal, apoi REIA județul.
                         statusText = "⚠ ${oc.status} — reîncerc în 60s"; updateNotif(statusText)
                         reacquireProviders()
@@ -582,7 +592,7 @@ class MockService : Service() {
         return abs(a2) / 2.0 / H3_RES10_AREA_M2
     }
 
-    private data class CalibResult(val tickHz: Int, val stepM: Double, val verdict: String)
+    private data class CalibResult(val seedStep: Double, val verdict: String)
 
     /**
      * CALIBRARE (o dată per device): măsoară EMPIRIC poarta Bump în loc s-o ghicim (vezi 4891e40 — 1080
@@ -592,8 +602,14 @@ class MockService : Service() {
      *     ~10 fix/cel): aceeași viteză, dublu fix-uri. DWELL >> CONTROL ⇒ limitat de fix-uri (tickHz e pârghia).
      *   • SCAN VITEZĂ (pas 20 fix, tickHz crescător 8→20 ⇒ 576…1440 km/h, fix/cel ≈ const): cea mai mare
      *     viteză cu ratio ≥ CALIB_PASS = poarta reală.
-     * Aplică (auto): tickHz + pas al celei mai rapide configurări care a trecut. Petice ratate rămân blocate
-     * → se acoperă normal după. Sigur prin design: o configurație „peste poartă" doar nu deblochează (nu strică).
+     * APLICĂ (auto, CONSERVATOR): NU schimbă tickHz (rămâne baza) — altfel s-ar fixa podeaua tuner-ului
+     * (STEP_MIN×tickHz) PESTE soft-spot-ul sigur de 540, iar un pass spurios la Hz mare ar bloca toată țara
+     * prea repede → 0 deblocări → „PIPELINE MORT" perpetuu, irecuperabil. În schimb produce doar un PAS-SĂMÂNȚĂ
+     * pt. tuner, ∈[soft-spot 25, STEP_MAX 50] (≡ 540…1080 km/h la baza tickHz), cu margine 0.85 pe poartă.
+     * Tuner-ul poate apoi urca SAU coborî (podeaua rămâne 324 km/h) → mereu există drum înapoi la sigur.
+     * Dacă e DWELL-limit (a accelera cere mai multe fix-uri = tickHz↑, ce evităm pt. siguranță) → rămâne la
+     * soft-spot. Plasă: dacă primul județ moare cu calibrarea aplicată, runAutoCounties revine la soft-spot.
+     * Sigur prin design: un patch testat „peste poartă" doar nu se deblochează (se acoperă normal după).
      * Întoarce null dacă nu găsește teren blocat de măsurat (reia data viitoare).
      */
     private fun runCalibration(origin: DoubleArray, baseTickHz: Int): CalibResult? {
@@ -641,18 +657,20 @@ class MockService : Service() {
         if (res.isEmpty()) return null
 
         fun ratioOf(t: Triple<Trial, Int, Int>) = t.third.toDouble() / t.second
-        val ctrl = res.firstOrNull { it.first.tag == "control" }?.let { ratioOf(it) }
-        val dwell = res.firstOrNull { it.first.tag == "dwell" }?.let { ratioOf(it) }
-        val dwellLimited = ctrl != null && dwell != null && dwell - ctrl > 0.05 && ctrl < 0.95
-        // alege configul cu VITEZA max care încă trece (ratio ≥ CALIB_PASS); dacă niciunul nu trece, cel mai bun ratio
-        val passing = res.filter { ratioOf(it) >= CALIB_PASS }
-        val best = passing.maxByOrNull { it.first.stepM * it.first.tickHz }
-            ?: res.maxByOrNull { ratioOf(it) }!!
-        val gateKmh = best.first.stepM * best.first.tickHz * 3.6
-        val verdict = "%s • poartă≈%.0f km/h (tickHz=%d, pas=%.0fm)".format(
-            if (dwellLimited) "DWELL-limit" else "VITEZĂ-limit", gateKmh, best.first.tickHz, best.first.stepM)
+        val ctrlR = res.firstOrNull { it.first.tag == "control" }?.let { ratioOf(it) }
+        val dwellR = res.firstOrNull { it.first.tag == "dwell" }?.let { ratioOf(it) }
+        val dwellLimited = ctrlR != null && dwellR != null && dwellR - ctrlR > 0.05 && ctrlR < 0.95
+        // poarta = cea mai mare VITEZĂ (m/s) care a trecut (ratio ≥ CALIB_PASS); dacă nimic n-a trecut →
+        // rămâi la soft-spot (nu accelera). Aplicare conservatoare: doar un PAS-sămânță la baza tickHz.
+        val gateMps = res.filter { ratioOf(it) >= CALIB_PASS }
+            .maxOfOrNull { it.first.stepM * it.first.tickHz } ?: (25.0 * baseTickHz)
+        val seedStep = if (dwellLimited) 25.0   // fix-limitat → speedup cere tickHz↑ (amânat) → soft-spot sigur
+                       else (0.85 * gateMps / baseTickHz).coerceIn(25.0, CoverageController.STEP_MAX)
+        val appliedKmh = seedStep * baseTickHz * 3.6
+        val verdict = "%s • poartă≈%.0f km/h → pornesc la %.0f km/h (pas %.0fm)".format(
+            if (dwellLimited) "DWELL-limit" else "VITEZĂ-limit", gateMps * 3.6, appliedKmh, seedStep)
         android.util.Log.i("MockService", "CALIB VERDICT: $verdict")
-        return CalibResult(best.first.tickHz, best.first.stepM, verdict)
+        return CalibResult(seedStep, verdict)
     }
 
     /**

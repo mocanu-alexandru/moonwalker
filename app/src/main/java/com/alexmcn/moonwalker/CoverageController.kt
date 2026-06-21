@@ -153,6 +153,19 @@ class CoverageController(private val ctx: Context, private val tickHz: Int) {
     /** Resetează contorul „pipeline mort" după un back-off (dă pipeline-ului o nouă șansă). */
     fun resetDead() { deadStreak = 0 }
 
+    /**
+     * Revine la SOFT-SPOT sigur (≈540 km/h: pas 25). Apelat când o calibrare prea agresivă a produs 0
+     * deblocări (dead) DEȘI pipeline-ul e dovedit viu (calibrarea tocmai a deblocat petice) → „dead" =
+     * viteză prea mare, nu pipeline mort. Persistă, deci data viitoare pornește de la soft-spot, nu de la
+     * sămânța prea agresivă. Resetează și streak-ul dead (repornim curat de la o viteză cunoscut-bună).
+     */
+    fun resetToSoftSpot() {
+        baseStep = 25.0; bestStep = 25.0
+        bestRate = Params(baseRow, baseStep, tickHz).areaRate
+        stepProbe = 4.0; deadStreak = 0
+        persist()
+    }
+
     fun persist() {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putFloat("row", bestRow.toFloat())
