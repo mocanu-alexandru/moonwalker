@@ -36,6 +36,7 @@ class MockService : Service() {
         const val EXTRA_SKIP_UNLOCKED = "skipUnlocked"   // sari zonele deja deblocate (UnlockedMask)
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
+        const val EXTRA_WORLD_TOUR = "worldTour"         // TUR CAPITALE: conduce prin capitalele lumii (nearest-first + 2-opt)
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -123,6 +124,7 @@ class MockService : Service() {
         val skipUnlocked = intent?.getBooleanExtra(EXTRA_SKIP_UNLOCKED, false) ?: false
         val auto = intent?.getBooleanExtra(EXTRA_AUTO, false) ?: false
         val seek = intent?.getBooleanExtra(EXTRA_SEEK, false) ?: false
+        val worldTour = intent?.getBooleanExtra(EXTRA_WORLD_TOUR, false) ?: false
         // Auto/seek sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
         if ((skipUnlocked || auto || seek) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
@@ -201,7 +203,7 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto, seek)
+            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto, seek, worldTour)
         return START_STICKY
     }
 
@@ -215,7 +217,7 @@ class MockService : Service() {
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
-        auto: Boolean = false, seek: Boolean = false
+        auto: Boolean = false, seek: Boolean = false, worldTour: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -268,6 +270,9 @@ class MockService : Service() {
 
             if (seek) {
                 runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
+            } else if (worldTour) {
+                // TUR CAPITALE — vezi runWorldTour(). Pură călătorie (fără mască/calibrare/cleanup).
+                runWorldTour(transitionOrigin, tickMs, speedKmh, metersPerTick, loop)
             } else if (auto) {
                 // MOD AUTONOM „BLAST RADIUS pe JUDEȚE" — vezi runAutoCounties().
                 runAutoCounties(transitionOrigin, tickHz)
@@ -312,6 +317,10 @@ class MockService : Service() {
         val steps = max(1, ceil(distM / metersPerTick).toInt())
         for (s in 1..steps) {
             if (stopFlag) return to
+            // Reînnoiește wakelock-ul periodic CHIAR în bucla de drive: un singur leg poate dura ore
+            // (turul capitalelor traversează oceane — mii de km la rând). Apelanții normali au legi
+            // scurte și renew extern, deci asta e inofensiv pentru ei; pentru tur e vital.
+            if (s % 256 == 0) renewWakelock()
             val t = s.toDouble() / steps
             val lat = from[0] + (to[0] - from[0]) * t
             val lon = from[1] + (to[1] - from[1]) * t
@@ -751,6 +760,90 @@ class MockService : Service() {
     }
 
     /**
+     * TUR CAPITALE: conduce CONTINUU (fără teleport) prin capitalele lumii, în ordine nearest-first din
+     * poziția curentă + ameliorare 2-opt (metrică HAVERSINE — corectă la scară globală, spre deosebire de
+     * metrica planară a modului România). Fiecare „leg" capitală→capitală e condus de `drive` la viteza
+     * configurată; legile lungi (oceane) sunt interpolate la `metersPerTick`, deci mișcarea rămâne fizică
+     * (Bump nu o vede ca teleport). Antimeridian: ținta se ajustează ±360° ca interpolarea să meargă pe
+     * drumul SCURT, iar `pushLocation` re-normalizează longitudinea injectată în [-180,180]. NU folosește
+     * masca/calibrarea/AutoState (pură călătorie). `loop` → reia turul de la capăt la final.
+     */
+    private fun runWorldTour(origin0: DoubleArray?, tickMs: Long, speedKmh: Double,
+                             metersPerTick: Double, loop: Boolean) {
+        val origin = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        statusText = "🌍 TUR: calculez ordinea capitalelor…"; updateNotif(statusText)
+        val tour = orderCapitalsTour(origin)
+        if (tour.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
+        val total = tour.size
+        var prev = origin   // mereu normalizat în [-180,180]
+        do {
+            for ((idx, cap) in tour.withIndex()) {
+                if (stopFlag) return
+                renewWakelock()
+                // antimeridian: du ținta pe drumul SCURT față de poziția curentă
+                var tgtLon = cap.lon
+                val dLon = tgtLon - prev[1]
+                if (dLon > 180.0) tgtLon -= 360.0 else if (dLon < -180.0) tgtLon += 360.0
+                val distKm = RouteGenerator.haversine(prev, doubleArrayOf(cap.lat, cap.lon)) / 1000.0
+                drive(prev, doubleArrayOf(cap.lat, tgtLon), tickMs, speedKmh, metersPerTick,
+                    "🌍 TUR • %d/%d • %s (%.0f km)".format(idx + 1, total, cap.name, distKm))
+                prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
+            }
+            statusText = "🌍 TUR ✓ %d capitale parcurse".format(total); updateNotif(statusText)
+        } while (loop && !stopFlag)
+    }
+
+    /**
+     * Ordonează capitalele pt. tur: nearest-neighbor lacom din `origin` (haversine), apoi 2-opt pe un
+     * DRUM DESCHIS din origine (inversează segmente cât timp scurtează traseul total). N≈195 → O(N²) per
+     * pasaj, câteva pasaje = ieftin (<1s). Determinist (listă fixă + origine) → același tur la reluare.
+     */
+    private fun orderCapitalsTour(origin: DoubleArray): List<Capitals.Cap> {
+        val caps = Capitals.all
+        if (caps.size <= 2) return caps
+        // (1) nearest-neighbor din origine
+        val remaining = ArrayList(caps)
+        val route = ArrayList<Capitals.Cap>(caps.size)
+        var cur = origin
+        while (remaining.isNotEmpty()) {
+            var bestI = 0; var bestD = Double.MAX_VALUE
+            for (i in remaining.indices) {
+                val d = RouteGenerator.haversine(cur, remaining[i].coord())
+                if (d < bestD) { bestD = d; bestI = i }
+            }
+            val c = remaining.removeAt(bestI); route.add(c); cur = c.coord()
+        }
+        // (2) 2-opt (drum deschis: origine fixă la stânga, fără ciclu de închidere)
+        val n = route.size
+        val co = Array(n) { route[it].coord() }
+        var improved = true; var pass = 0
+        while (improved && pass < 8 && !stopFlag) {
+            improved = false; pass++
+            for (i in 0 until n - 1) {
+                for (k in i + 1 until n) {
+                    val aPrev = if (i == 0) origin else co[i - 1]
+                    val ai = co[i]; val ck = co[k]
+                    val cNext = if (k + 1 < n) co[k + 1] else null
+                    val before = RouteGenerator.haversine(aPrev, ai) +
+                        (if (cNext != null) RouteGenerator.haversine(ck, cNext) else 0.0)
+                    val after = RouteGenerator.haversine(aPrev, ck) +
+                        (if (cNext != null) RouteGenerator.haversine(ai, cNext) else 0.0)
+                    if (after + 1e-6 < before) {
+                        var lo = i; var hi = k
+                        while (lo < hi) {
+                            val tc = co[lo]; co[lo] = co[hi]; co[hi] = tc
+                            val tr = route[lo]; route[lo] = route[hi]; route[hi] = tr
+                            lo++; hi--
+                        }
+                        improved = true
+                    }
+                }
+            }
+        }
+        return route
+    }
+
+    /**
      * Ordonează găurile prin nearest-neighbor lacom pornind din `start` (poziția curentă): la fiecare
      * pas alege gaura cea mai apropiată de unde ești ACUM. Minimizează drumul total — botul nu mai e
      * trimis în cealaltă parte a țării ca la traseul pe benzi. Distanță planară ieftină (equirectangular,
@@ -786,9 +879,12 @@ class MockService : Service() {
         ))
     }
 
-    private fun pushLocation(lat: Double, lon: Double, speedKmh: Double) {
+    private fun pushLocation(lat: Double, lonRaw: Double, speedKmh: Double) {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtimeNanos()
+        // Normalizează longitudinea în [-180,180]: turul capitalelor poate conduce „peste" antimeridian
+        // (ex. Wellington 174° → Apia 189° ca să meargă pe drumul scurt) → readuce în interval la injecție.
+        val lon = ((lonRaw + 540.0) % 360.0) - 180.0
         prevLat = lat; prevLon = lon
         // Câmpuri EXACT ca Lockito (decompilat s5.b.a): doar time, lat/lon, altitude, speed,
         // accuracy, elapsedRealtimeNanos. FĂRĂ bearing, FĂRĂ sub-acurateți, FĂRĂ extras —

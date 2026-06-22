@@ -60,6 +60,16 @@
         android:paddingTop="10dp"
         android:paddingBottom="10dp" />
 
+    <!-- Mod „fun": conduce prin toate capitalele lumii (nearest-first + 2-opt), la viteza configurată.
+         Butonul unic de sus gestionează pauza/oprirea pentru ORICE mod care rulează. -->
+    <Button android:id="@+id/btnTour"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🌍 TUR CAPITALE — prin toate capitalele lumii"
+        android:textSize="13sp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp" />
+
     <TextView
         android:id="@+id/versionTv"
         android:layout_width="match_parent"

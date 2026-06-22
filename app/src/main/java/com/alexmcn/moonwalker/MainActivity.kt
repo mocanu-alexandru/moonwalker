@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var permsLbl: TextView
     private lateinit var btnStop: Button
+    private lateinit var btnTour: Button
 
     private var curMarker: Marker? = null
     private val ui = Handler(Looper.getMainLooper())
@@ -58,6 +59,7 @@ class MainActivity : AppCompatActivity() {
         map      = findViewById(R.id.map)
         status   = findViewById(R.id.status)
         btnStop  = findViewById(R.id.btnStop)
+        btnTour  = findViewById(R.id.btnTour)
 
         setupMap()
         setupButtons()
@@ -100,6 +102,34 @@ class MainActivity : AppCompatActivity() {
             true
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
+        btnTour.setOnClickListener { startWorldTour() }
+    }
+
+    /**
+     * MOD „TUR CAPITALE": conduce prin toate capitalele lumii (nearest-first + 2-opt din locația ta),
+     * la ~1080 km/h, în buclă. Pură călătorie — NU folosește masca/calibrarea, deci merge oriunde.
+     * Override peste pornirea automată; butonul de sus (STOP/CONTINUĂ) controlează apoi pauza/oprirea.
+     */
+    private fun startWorldTour() {
+        // poly „ancoră" doar ca să treacă verificarea din service; turul folosește locația reală + capitalele.
+        val h = homeLocation
+        val poly = if (h != null)
+            "%.5f,%.5f;%.5f,%.5f;%.5f,%.5f".format(
+                h.latitude - 0.003, h.longitude - 0.003,
+                h.latitude + 0.003, h.longitude + 0.003,
+                h.latitude + 0.003, h.longitude - 0.003)
+        else "47.157,27.577;47.163,27.583;47.163,27.577"
+        val i = Intent(this, MockService::class.java).apply {
+            // 6 inj/s × pas 50m = ~1080 km/h (precizie confirmată ok la această viteză).
+            putExtra(MockService.EXTRA_TICK_HZ, 6)
+            putExtra(MockService.EXTRA_ROW_M, 75.0)
+            putExtra(MockService.EXTRA_STEP_M, 50.0)
+            putExtra(MockService.EXTRA_LOOP, true)
+            putExtra(MockService.EXTRA_WORLD_TOUR, true)
+            putExtra(MockService.EXTRA_POLY, poly)
+        }
+        startForegroundService(i)
+        toast("🌍 TUR CAPITALE pornit — prin toate capitalele lumii la ~1080 km/h (apasă din nou butonul de sus = pauză)")
     }
 
     /**
