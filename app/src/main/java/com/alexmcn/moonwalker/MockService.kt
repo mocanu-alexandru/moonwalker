@@ -272,7 +272,7 @@ class MockService : Service() {
                 runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
             } else if (worldTour) {
                 // TUR CAPITALE — vezi runWorldTour(). Pură călătorie (fără mască/calibrare/cleanup).
-                runWorldTour(transitionOrigin, tickMs, speedKmh, metersPerTick, loop)
+                runWorldTour(transitionOrigin, tickMs, speedKmh, metersPerTick, loop, resumeRow)
             } else if (auto) {
                 // MOD AUTONOM „BLAST RADIUS pe JUDEȚE" — vezi runAutoCounties().
                 runAutoCounties(transitionOrigin, tickHz)
@@ -769,16 +769,35 @@ class MockService : Service() {
      * masca/calibrarea/AutoState (pură călătorie). `loop` → reia turul de la capăt la final.
      */
     private fun runWorldTour(origin0: DoubleArray?, tickMs: Long, speedKmh: Double,
-                             metersPerTick: Double, loop: Boolean) {
-        val origin = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
+                             metersPerTick: Double, loop: Boolean, resumeRow: Int = -1) {
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        // ANCORĂ STABILĂ pentru ordinea turului: fixată la PRIMA pornire și refolosită la fiecare
+        // reluare. Fără asta, orderCapitalsTour() s-ar recalcula din poziția CURENTĂ (ultima capitală
+        // atinsă) → altă ordine → capitalele deja vizitate ar reapărea la pauză/reluare (bug-ul „reia
+        // pe același drum"). Cu ancoră fixă, ordinea e identică și `resumeRow` indexează corect.
+        val reuse = resumeRow > 0 && p.getBoolean("tour_anchor_valid", false)
+        val anchor: DoubleArray = if (reuse) {
+            doubleArrayOf(Double.fromBits(p.getLong("tour_anchor_lat", 0L)),
+                          Double.fromBits(p.getLong("tour_anchor_lon", 0L)))
+        } else {
+            val a = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
+            p.edit().putBoolean("tour_anchor_valid", true)
+                .putLong("tour_anchor_lat", a[0].toRawBits())
+                .putLong("tour_anchor_lon", a[1].toRawBits()).apply()
+            a
+        }
         statusText = "🌍 TUR: calculez ordinea capitalelor…"; updateNotif(statusText)
-        val tour = orderCapitalsTour(origin)
+        val tour = orderCapitalsTour(anchor)
         if (tour.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
         val total = tour.size
-        var prev = origin   // mereu normalizat în [-180,180]
+        // continuăm din poziția REALĂ curentă; la reluare sărim capitalele deja parcurse.
+        var prev = origin0 ?: anchor   // mereu normalizat în [-180,180]
+        var idx = if (reuse) resumeRow.coerceIn(0, total) else 0
         do {
-            for ((idx, cap) in tour.withIndex()) {
+            while (idx < total) {
                 if (stopFlag) return
+                curRow = idx          // progres persistabil (pauseRoute → persistResume salvează „row")
+                val cap = tour[idx]
                 renewWakelock()
                 // antimeridian: du ținta pe drumul SCURT față de poziția curentă
                 var tgtLon = cap.lon
@@ -788,19 +807,27 @@ class MockService : Service() {
                 drive(prev, doubleArrayOf(cap.lat, tgtLon), tickMs, speedKmh, metersPerTick,
                     "🌍 TUR • %d/%d • %s (%.0f km)".format(idx + 1, total, cap.name, distKm))
                 prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
+                idx++
             }
             statusText = "🌍 TUR ✓ %d capitale parcurse".format(total); updateNotif(statusText)
+            idx = 0; curRow = 0   // tur complet → la loop reluăm de la prima capitală
         } while (loop && !stopFlag)
     }
 
     /**
-     * Ordonează capitalele pt. tur: nearest-neighbor lacom din `origin` (haversine), apoi 2-opt pe un
-     * DRUM DESCHIS din origine (inversează segmente cât timp scurtează traseul total). N≈195 → O(N²) per
-     * pasaj, câteva pasaje = ieftin (<1s). Determinist (listă fixă + origine) → același tur la reluare.
+     * Ordonează capitalele pt. CEL MAI SCURT tur: nearest-neighbor lacom din `origin` (haversine),
+     * apoi îmbunătățire locală pe un DRUM DESCHIS (origine fixă la stânga, fără ciclu de închidere):
+     *   • 2-opt  — inversează un segment cât timp scurtează traseul (rezolvă încrucișările);
+     *   • Or-opt — relocă un segment de 1..3 capitale (drept sau inversat) acolo unde scurtează mai
+     *     mult (rezolvă „cârligele" rămase de la nearest-neighbor).
+     * Alternăm cele două până nu mai scade lungimea. Aplicăm DOAR mișcări strict mai bune (> eps) →
+     * rezultatul nu poate fi mai prost ca NN+2-opt. N≈195 → câteva pasaje O(N²) = ieftin (<2s).
+     * Determinist (listă fixă + `origin`) → exact același tur la reluare (de asta depinde resume-ul).
      */
     private fun orderCapitalsTour(origin: DoubleArray): List<Capitals.Cap> {
         val caps = Capitals.all
         if (caps.size <= 2) return caps
+        fun hav(a: DoubleArray, b: DoubleArray) = RouteGenerator.haversine(a, b)
         // (1) nearest-neighbor din origine
         val remaining = ArrayList(caps)
         val route = ArrayList<Capitals.Cap>(caps.size)
@@ -808,35 +835,65 @@ class MockService : Service() {
         while (remaining.isNotEmpty()) {
             var bestI = 0; var bestD = Double.MAX_VALUE
             for (i in remaining.indices) {
-                val d = RouteGenerator.haversine(cur, remaining[i].coord())
+                val d = hav(cur, remaining[i].coord())
                 if (d < bestD) { bestD = d; bestI = i }
             }
             val c = remaining.removeAt(bestI); route.add(c); cur = c.coord()
         }
-        // (2) 2-opt (drum deschis: origine fixă la stânga, fără ciclu de închidere)
         val n = route.size
-        val co = Array(n) { route[it].coord() }
+        fun co(i: Int) = route[i].coord()   // doar returnează DoubleArray-ul stocat (ieftin)
+        // (2) îmbunătățire locală alternând 2-opt + Or-opt până la convergență
         var improved = true; var pass = 0
-        while (improved && pass < 8 && !stopFlag) {
+        while (improved && pass < 30 && !stopFlag) {
             improved = false; pass++
+            // --- 2-opt: inversează route[i..k] dacă scurtează ---
             for (i in 0 until n - 1) {
                 for (k in i + 1 until n) {
-                    val aPrev = if (i == 0) origin else co[i - 1]
-                    val ai = co[i]; val ck = co[k]
-                    val cNext = if (k + 1 < n) co[k + 1] else null
-                    val before = RouteGenerator.haversine(aPrev, ai) +
-                        (if (cNext != null) RouteGenerator.haversine(ck, cNext) else 0.0)
-                    val after = RouteGenerator.haversine(aPrev, ck) +
-                        (if (cNext != null) RouteGenerator.haversine(ai, cNext) else 0.0)
+                    val aPrev = if (i == 0) origin else co(i - 1)
+                    val ai = co(i); val ck = co(k)
+                    val cNext = if (k + 1 < n) co(k + 1) else null
+                    val before = hav(aPrev, ai) + (if (cNext != null) hav(ck, cNext) else 0.0)
+                    val after = hav(aPrev, ck) + (if (cNext != null) hav(ai, cNext) else 0.0)
                     if (after + 1e-6 < before) {
                         var lo = i; var hi = k
-                        while (lo < hi) {
-                            val tc = co[lo]; co[lo] = co[hi]; co[hi] = tc
-                            val tr = route[lo]; route[lo] = route[hi]; route[hi] = tr
-                            lo++; hi--
-                        }
+                        while (lo < hi) { val t = route[lo]; route[lo] = route[hi]; route[hi] = t; lo++; hi-- }
                         improved = true
                     }
+                }
+            }
+            // --- Or-opt: scoate segmentul [i, i+L) și reinserează-l unde scurtează cel mai mult ---
+            for (segLen in 1..3) {
+                var i = 0
+                while (i + segLen <= n) {
+                    val oldPrev = if (i == 0) origin else co(i - 1)
+                    val segFirst = co(i); val segLast = co(i + segLen - 1)
+                    val oldNext = if (i + segLen < n) co(i + segLen) else null
+                    // câștigul din închiderea golului lăsat de segment
+                    val removalSaving = hav(oldPrev, segFirst) +
+                        (if (oldNext != null) hav(segLast, oldNext) - hav(oldPrev, oldNext) else 0.0)
+                    val seg = ArrayList(route.subList(i, i + segLen))
+                    val rest = ArrayList<Capitals.Cap>(n - segLen)
+                    rest.addAll(route.subList(0, i)); rest.addAll(route.subList(i + segLen, n))
+                    val m = rest.size
+                    var bestGain = 1e-6   // pragul: doar mutări STRICT mai bune
+                    var bestG = -1; var bestRev = false
+                    for (g in 0..m) {
+                        val pPrev = if (g == 0) origin else rest[g - 1].coord()
+                        val pNext = if (g < m) rest[g].coord() else null
+                        val gapBase = if (pNext != null) hav(pPrev, pNext) else 0.0
+                        val sF = seg.first().coord(); val sL = seg.last().coord()
+                        val addF = hav(pPrev, sF) + (if (pNext != null) hav(sL, pNext) else 0.0) - gapBase
+                        val addR = hav(pPrev, sL) + (if (pNext != null) hav(sF, pNext) else 0.0) - gapBase
+                        if (removalSaving - addF > bestGain) { bestGain = removalSaving - addF; bestG = g; bestRev = false }
+                        if (segLen > 1 && removalSaving - addR > bestGain) { bestGain = removalSaving - addR; bestG = g; bestRev = true }
+                    }
+                    if (bestG >= 0) {
+                        if (bestRev) seg.reverse()
+                        rest.addAll(bestG, seg)
+                        route.clear(); route.addAll(rest)
+                        improved = true
+                    }
+                    i++
                 }
             }
         }

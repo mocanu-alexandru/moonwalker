@@ -120,16 +120,16 @@ class MainActivity : AppCompatActivity() {
                 h.latitude + 0.003, h.longitude - 0.003)
         else "47.157,27.577;47.163,27.583;47.163,27.577"
         val i = Intent(this, MockService::class.java).apply {
-            // 6 inj/s × pas 50m = ~1080 km/h (precizie confirmată ok la această viteză).
+            // 6 inj/s × pas 100m = ~2160 km/h (tur „pură călătorie", fără validare Bump → pas mărit ok).
             putExtra(MockService.EXTRA_TICK_HZ, 6)
             putExtra(MockService.EXTRA_ROW_M, 75.0)
-            putExtra(MockService.EXTRA_STEP_M, 50.0)
+            putExtra(MockService.EXTRA_STEP_M, 100.0)
             putExtra(MockService.EXTRA_LOOP, true)
             putExtra(MockService.EXTRA_WORLD_TOUR, true)
             putExtra(MockService.EXTRA_POLY, poly)
         }
         startForegroundService(i)
-        toast("🌍 TUR CAPITALE pornit — prin toate capitalele lumii la ~1080 km/h (apasă din nou butonul de sus = pauză)")
+        toast("🌍 TUR CAPITALE pornit — prin toate capitalele lumii la ~2160 km/h (apasă din nou butonul de sus = pauză)")
     }
 
     /**
