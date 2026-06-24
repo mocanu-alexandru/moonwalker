@@ -119,4 +119,18 @@ object Capitals {
         Cap("Honiara", -9.43, 159.96), Cap("Nuku'alofa", -21.14, -175.20),
         Cap("Funafuti", -8.52, 179.20), Cap("Port Vila", -17.73, 168.32),
     )
+
+    /**
+     * Capitale DEJA PARCURSE („bifate") — excluse din traseul turului. Sursa de adevăr pt. seed-ul
+     * inițial; pe lângă astea, turul bifează AUTOMAT fiecare capitală pe care o parcurge (persistat în
+     * prefs `tour_done`), deci nu se mai repetă niciodată. Ca să ajustezi lista de bifate, adaugă/șterge
+     * nume aici (trebuie să se potrivească EXACT cu numele din `all`).
+     */
+    val PRESET_DONE: Set<String> = setOf(
+        "București", "Chișinău", "Sofia", "Pristina", "Skopje", "Tirana", "Sarajevo", "Belgrad",
+        "Budapesta", "Bratislava", "Viena", "Praga", "Berlin", "Copenhaga", "Oslo", "Stockholm",
+        "Helsinki", "Riga", "Varșovia", "Vilnius", "Minsk", "Kiev", "Moscova", "Astana", "Ulan Bator",
+        "Beijing", "Phenian", "Seul", "Tokyo", "Palikir", "Yaren", "Majuro", "Tarawa", "Funafuti",
+        "Apia", "Nuku'alofa", "Suva", "Wellington", "Canberra", "Port Moresby", "Honiara",
+    )
 }

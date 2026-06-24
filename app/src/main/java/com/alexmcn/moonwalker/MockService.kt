@@ -816,47 +816,31 @@ class MockService : Service() {
                              metersPerTick: Double, loop: Boolean, resumeRow: Int = -1,
                              resumeCapName: String? = null) {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-        // Capitală de START (ex. „Chișinău"): tur COMPLET ordonat din ea, pornind chiar de la ea.
-        // Persistăm alegerea → rămâne validă la pauză/reluare/restart; ordinea e deterministă din capitală,
-        // deci progresul (curRow) indexează mereu aceeași listă (reluare corectă, fără repetare).
-        if (resumeCapName != null) p.edit().putString("tour_resume_cap", resumeCapName).apply()
-        val capName = resumeCapName ?: p.getString("tour_resume_cap", null)
-        val resumeCap = capName?.let { name -> Capitals.all.firstOrNull { it.name.equals(name, true) } }
-
-        // ANCORĂ pentru ordine: capitala de start dacă e dată (ordine STABILĂ, deterministă din ea);
-        // altfel ancoră home salvată (reluare) sau locația curentă (tur nou).
-        val savedAnchor = if (p.getBoolean("tour_anchor_valid", false))
-            validGeo(doubleArrayOf(Double.fromBits(p.getLong("tour_anchor_lat", 0L)),
-                                   Double.fromBits(p.getLong("tour_anchor_lon", 0L)))) else null
-        val anchor: DoubleArray = when {
-            resumeCap != null -> resumeCap.coord()                                   // start din capitală
-            savedAnchor != null && resumeRow > 0 -> savedAnchor                      // reluare → ordine stabilă
-            else -> (validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)).also {  // tur nou din locația ta
-                p.edit().putBoolean("tour_anchor_valid", true)
-                    .putLong("tour_anchor_lat", it[0].toRawBits())
-                    .putLong("tour_anchor_lon", it[1].toRawBits()).apply()
-            }
+        // CHECKLIST „bifate": setul capitalelor DEJA PARCURSE = preset (lista ta din Capitals.PRESET_DONE)
+        // ∪ cele bifate AUTOMAT pe parcurs (persistate în `tour_done`). Excluse din traseu → fără repetare.
+        val done = (p.getStringSet("tour_done", null)?.toMutableSet() ?: mutableSetOf())
+        done.addAll(Capitals.PRESET_DONE)
+        fun markDone(name: String) {
+            if (done.add(name)) p.edit().putStringSet("tour_done", HashSet(done)).apply()
         }
-        statusText = "🌍 TUR: calculez ordinea capitalelor…"; updateNotif(statusText)
-        val tour = orderCapitalsTour(anchor)
-        if (tour.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
-        // de unde pornim când NU reluăm la mijloc: din capitala de start, altfel din locația curentă
-        val startPoint: DoubleArray = if (resumeCap != null) resumeCap.coord() else (validGeo(origin0) ?: anchor)
-        statusText = if (resumeCap != null) "🌍 TUR: din ${resumeCap.name} • ${tour.size} capitale"
-                     else "🌍 TUR • ${tour.size} capitale"
-        updateNotif(statusText)
-        val total = tour.size
-        // Prima aplicare a continuării (resumeCapName != null) pleacă mereu din capul listei RĂMASE
-        // (idx 0), niciodată cu un resumeRow rămas din alt context. La reluare genuină (resumeCapName
-        // null) resumeRow indexează exact aceeași listă rămasă (deterministă) → continuă din poziția curentă.
-        var idx = if (resumeCapName == null && resumeRow > 0) resumeRow.coerceIn(0, total) else 0
-        var prev = if (idx > 0) (validGeo(origin0) ?: startPoint) else startPoint
-        curRow = idx
+
+        // De unde ordonăm + pornim: poziția REALĂ curentă dacă există (continuă de unde ești), altfel
+        // Chișinău (home). Traseul se RECALCULEAZĂ peste capitalele rămase → se adaptează la checklist.
+        val startPoint = validGeo(origin0)
+            ?: Capitals.all.firstOrNull { it.name == "Chișinău" }?.coord()
+            ?: doubleArrayOf(IASI_LAT, IASI_LON)
+
+        statusText = "🌍 TUR: calculez traseul rămas…"; updateNotif(statusText)
+        var prev = startPoint
         do {
-            while (idx < total) {
+            val remaining = Capitals.all.filter { it.name !in done }
+            if (remaining.isEmpty()) {
+                statusText = "🌍 TUR ✓ toate ${Capitals.all.size} capitalele bifate"; updateNotif(statusText); return
+            }
+            val tour = orderCapitalsTour(prev, remaining)
+            val total = tour.size
+            for ((i, cap) in tour.withIndex()) {
                 if (stopFlag) return
-                curRow = idx          // progres persistabil (pauseRoute → persistResume salvează „row")
-                val cap = tour[idx]
                 renewWakelock()
                 // antimeridian: du ținta pe drumul SCURT față de poziția curentă
                 var tgtLon = cap.lon
@@ -864,12 +848,12 @@ class MockService : Service() {
                 if (dLon > 180.0) tgtLon -= 360.0 else if (dLon < -180.0) tgtLon += 360.0
                 val distKm = RouteGenerator.haversine(prev, doubleArrayOf(cap.lat, cap.lon)) / 1000.0
                 drive(prev, doubleArrayOf(cap.lat, tgtLon), tickMs, speedKmh, metersPerTick,
-                    "🌍 TUR • %d/%d • %s (%.0f km)".format(idx + 1, total, cap.name, distKm))
+                    "🌍 TUR • %d/%d • %s (%.0f km) • %d bifate".format(i + 1, total, cap.name, distKm, done.size))
                 prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
-                idx++
+                markDone(cap.name)                       // BIFEAZĂ (persistă) → nu se mai repetă
             }
-            statusText = "🌍 TUR ✓ %d capitale parcurse".format(total); updateNotif(statusText)
-            idx = 0; curRow = 0   // tur complet → la loop reluăm de la prima capitală (din nou din Chișinău)
+            statusText = "🌍 TUR ✓ $total capitale parcurse acum (${done.size}/${Capitals.all.size} bifate)"
+            updateNotif(statusText)
         } while (loop && !stopFlag)
     }
 
@@ -1247,7 +1231,13 @@ class MockService : Service() {
             (abs(p[0]) > 0.001 || abs(p[1]) > 0.001)) p else null
 
     private fun clearResume() {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
+        // Uită poziția de reluat la oprire completă, dar PĂSTREAZĂ checklist-ul turului (`tour_done`)
+        // și ultimul GPS — progresul „bifate" nu trebuie pierdut la un stop.
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .remove("valid").remove("lat").remove("lon").remove("row").remove("key")
+            .remove("tour_resume_cap").remove("tour_anchor_valid")
+            .remove("tour_anchor_lat").remove("tour_anchor_lon")
+            .apply()
     }
 
     override fun onDestroy() {
