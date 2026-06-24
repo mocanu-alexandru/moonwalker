@@ -37,6 +37,7 @@ class MockService : Service() {
         const val EXTRA_AUTO = "auto"                    // auto-extindere din locație (spirală blocuri)
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
         const val EXTRA_WORLD_TOUR = "worldTour"         // TUR CAPITALE: conduce prin capitalele lumii (nearest-first + 2-opt)
+        const val EXTRA_TOUR_RESUME_CAP = "tourResumeCap" // TUR: continuă DUPĂ această capitală (ex. ultima deblocată), o singură dată
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -125,6 +126,7 @@ class MockService : Service() {
         val auto = intent?.getBooleanExtra(EXTRA_AUTO, false) ?: false
         val seek = intent?.getBooleanExtra(EXTRA_SEEK, false) ?: false
         val worldTour = intent?.getBooleanExtra(EXTRA_WORLD_TOUR, false) ?: false
+        val tourResumeCap = intent?.getStringExtra(EXTRA_TOUR_RESUME_CAP)
         // Auto/seek sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
         if ((skipUnlocked || auto || seek) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
@@ -239,7 +241,7 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour)
+            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour, tourResumeCap)
         return START_STICKY
     }
 
@@ -253,7 +255,8 @@ class MockService : Service() {
         zone: Zone, tickHz: Int, rowM: Double, stepM: Double,
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
-        auto: Boolean = false, seek: Boolean = false, worldTour: Boolean = false
+        auto: Boolean = false, seek: Boolean = false, worldTour: Boolean = false,
+        tourResumeCap: String? = null
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -805,32 +808,71 @@ class MockService : Service() {
      * masca/calibrarea/AutoState (pură călătorie). `loop` → reia turul de la capăt la final.
      */
     private fun runWorldTour(origin0: DoubleArray?, tickMs: Long, speedKmh: Double,
-                             metersPerTick: Double, loop: Boolean, resumeRow: Int = -1) {
+                             metersPerTick: Double, loop: Boolean, resumeRow: Int = -1,
+                             resumeCapName: String? = null) {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-        // ANCORĂ STABILĂ pentru ordinea turului: fixată la PRIMA pornire și refolosită la fiecare
-        // reluare. Fără asta, orderCapitalsTour() s-ar recalcula din poziția CURENTĂ (ultima capitală
-        // atinsă) → altă ordine → capitalele deja vizitate ar reapărea la pauză/reluare (bug-ul „reia
-        // pe același drum"). Cu ancoră fixă, ordinea e identică și `resumeRow` indexează corect.
+        // CONTINUARE de la o capitală anume (ex. „ultima deblocată = Port Moresby"). Alegerea o
+        // PERSISTĂM (nu doar one-shot din UI) ca să rămână validă la pauză/reluare/restart: tot traseul
+        // rămas se recalculează DETERMINIST din ea, deci progresul (curRow) indexează mereu aceeași listă.
+        if (resumeCapName != null) p.edit().putString("tour_resume_cap", resumeCapName).apply()
+        val capName = resumeCapName ?: p.getString("tour_resume_cap", null)
+        val resumeCap = capName?.let { name -> Capitals.all.firstOrNull { it.name.equals(name, true) } }
+
+        // ANCORĂ STABILĂ pentru ordinea de bază (home): fixată o dată și refolosită → ordine identică la
+        // reluare. Re-ancorăm din origin0 DOAR la un tur nou (fără resumeCap, fără progres salvat).
         val savedAnchor = if (p.getBoolean("tour_anchor_valid", false))
             validGeo(doubleArrayOf(Double.fromBits(p.getLong("tour_anchor_lat", 0L)),
                                    Double.fromBits(p.getLong("tour_anchor_lon", 0L)))) else null
-        val reuse = resumeRow > 0 && savedAnchor != null
-        val anchor: DoubleArray = if (reuse) {
-            savedAnchor!!
-        } else {
-            val a = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        // HOME real persistat (GPS) — folosit ca ancoră la continuarea după capitală: origin0 poate fi
+        // poziția curentă mock (chiar capitala!), iar dacă am ancora ordinea de bază pe ea, „vizitate"
+        // ar ieși greșit (doar capitala) → s-ar reface toată Europa/Asia. Home-ul ne dă ordinea reală.
+        val persistedGps = if (p.getBoolean("gpsValid", false))
+            validGeo(doubleArrayOf(Double.fromBits(p.getLong("gpsLat", 0L)),
+                                   Double.fromBits(p.getLong("gpsLon", 0L)))) else null
+        fun persistAnchor(a: DoubleArray): DoubleArray {
             p.edit().putBoolean("tour_anchor_valid", true)
                 .putLong("tour_anchor_lat", a[0].toRawBits())
                 .putLong("tour_anchor_lon", a[1].toRawBits()).apply()
-            a
+            return a
+        }
+        val anchor: DoubleArray = when {
+            savedAnchor != null && (resumeCap != null || resumeRow > 0) -> savedAnchor   // ordine stabilă
+            resumeCap != null -> persistAnchor(persistedGps ?: doubleArrayOf(IASI_LAT, IASI_LON))   // home, NU origin0 (poate fi chiar capitala)
+            else -> persistAnchor(validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON))  // tur nou din locația ta
         }
         statusText = "🌍 TUR: calculez ordinea capitalelor…"; updateNotif(statusText)
-        val tour = orderCapitalsTour(anchor)
-        if (tour.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
+        val baseOrder = orderCapitalsTour(anchor)
+        if (baseOrder.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
+
+        val tour: List<Capitals.Cap>
+        val startPoint: DoubleArray   // de unde pornim când NU reluăm la mijloc
+        if (resumeCap != null) {
+            // SCOATE capitalele deja parcurse din listă: în ordinea home, tot ce e până la & inclusiv
+            // capitala curentă (Port Moresby) = făcut. Re-optimizăm DOAR rămasele, pornind chiar de la
+            // capitala curentă → cel mai scurt traseu peste ce-a mai rămas, fără să retrecem pe unde-am fost.
+            val ci = baseOrder.indexOfFirst { it.name == resumeCap.name }
+            val visited = if (ci >= 0) baseOrder.subList(0, ci + 1).mapTo(HashSet()) { it.name }
+                          else hashSetOf(resumeCap.name)
+            val remaining = Capitals.all.filter { it.name !in visited }
+            tour = orderCapitalsTour(resumeCap.coord(), remaining)
+            startPoint = resumeCap.coord()
+            statusText = "🌍 TUR: continuă de la ${resumeCap.name} • ${tour.size} rămase (${visited.size} sărite)"
+            updateNotif(statusText)
+        } else {
+            tour = baseOrder
+            startPoint = validGeo(origin0) ?: anchor   // mereu normalizat în [-180,180]
+        }
+        if (tour.isEmpty()) {   // totul deja parcurs → uită continuarea, data viitoare tur complet
+            p.edit().remove("tour_resume_cap").apply()
+            statusText = "🌍 TUR ✓ toate capitalele deja parcurse"; updateNotif(statusText); return
+        }
         val total = tour.size
-        // continuăm din poziția REALĂ curentă; la reluare sărim capitalele deja parcurse.
-        var prev = validGeo(origin0) ?: anchor   // mereu normalizat în [-180,180]
-        var idx = if (reuse) resumeRow.coerceIn(0, total) else 0
+        // Prima aplicare a continuării (resumeCapName != null) pleacă mereu din capul listei RĂMASE
+        // (idx 0), niciodată cu un resumeRow rămas din alt context. La reluare genuină (resumeCapName
+        // null) resumeRow indexează exact aceeași listă rămasă (deterministă) → continuă din poziția curentă.
+        var idx = if (resumeCapName == null && resumeRow > 0) resumeRow.coerceIn(0, total) else 0
+        var prev = if (idx > 0) (validGeo(origin0) ?: startPoint) else startPoint
+        curRow = idx
         do {
             while (idx < total) {
                 if (stopFlag) return
@@ -848,6 +890,8 @@ class MockService : Service() {
                 idx++
             }
             statusText = "🌍 TUR ✓ %d capitale parcurse".format(total); updateNotif(statusText)
+            // Rămasele s-au terminat → uită continuarea: un viitor start face iar tur complet.
+            if (resumeCap != null) p.edit().remove("tour_resume_cap").apply()
             idx = 0; curRow = 0   // tur complet → la loop reluăm de la prima capitală
         } while (loop && !stopFlag)
     }
@@ -860,10 +904,10 @@ class MockService : Service() {
      *     mult (rezolvă „cârligele" rămase de la nearest-neighbor).
      * Alternăm cele două până nu mai scade lungimea. Aplicăm DOAR mișcări strict mai bune (> eps) →
      * rezultatul nu poate fi mai prost ca NN+2-opt. N≈195 → câteva pasaje O(N²) = ieftin (<2s).
-     * Determinist (listă fixă + `origin`) → exact același tur la reluare (de asta depinde resume-ul).
+     * Determinist (`caps` fix + `origin`) → exact același tur la reluare (de asta depinde resume-ul).
+     * `caps` = lista de ordonat (implicit toate); la CONTINUARE primește doar capitalele RĂMASE.
      */
-    private fun orderCapitalsTour(origin: DoubleArray): List<Capitals.Cap> {
-        val caps = Capitals.all
+    private fun orderCapitalsTour(origin: DoubleArray, caps: List<Capitals.Cap> = Capitals.all): List<Capitals.Cap> {
         if (caps.size <= 2) return caps
         fun hav(a: DoubleArray, b: DoubleArray) = RouteGenerator.haversine(a, b)
         // (1) nearest-neighbor din origine
