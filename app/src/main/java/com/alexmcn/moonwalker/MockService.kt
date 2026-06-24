@@ -182,28 +182,64 @@ class MockService : Service() {
             if (loc != null) doubleArrayOf(loc.latitude, loc.longitude) else null
         } catch (_: SecurityException) { null }
 
+        // „Pornire la rece" = NU rulăm și nu suntem parcați în memorie (proces proaspăt / alt mod).
+        // Resume GENUIN = parcat/rulează cu poziție curentă reală (continuă din traseu, în memorie).
+        val coldStart = !((running || holding) && (curLat != 0.0 || curLon != 0.0))
+
+        // Persistă ULTIMA LOCAȚIE GPS REALĂ (doar la rece, mock oprit) = „ultimul hexagon deblocat".
+        // O folosim ca origine pt. TUR după un restart de proces, fără a recurge la „acasă".
+        if (coldStart) validGeo(realStart)?.let {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putLong("gpsLat", it[0].toRawBits()).putLong("gpsLon", it[1].toRawBits())
+                .putBoolean("gpsValid", true).apply()
+        }
+
         // RELUARE de unde am rămas (fără revenire acasă):
         //  - origine = ultima poziție (dacă suntem parcați/rulăm, sau din prefs după restart proces)
         //  - rând = progresul salvat, DOAR dacă reluăm același traseu (același poly)
         var resumeOrigin: DoubleArray? = null
         var resumeRow = -1
-        if ((running || holding) && (curLat != 0.0 || curLon != 0.0)) {
-            resumeOrigin = doubleArrayOf(curLat, curLon)
+        if (!coldStart) {
+            resumeOrigin = validGeo(doubleArrayOf(curLat, curLon))
             if (curPolyKey == polyStr) resumeRow = curRow
         } else {
             val p = getSharedPreferences(PREFS, MODE_PRIVATE)
             if (p.getBoolean("valid", false)) {
-                resumeOrigin = doubleArrayOf(
+                resumeOrigin = validGeo(doubleArrayOf(
                     Double.fromBits(p.getLong("lat", 0L)),
-                    Double.fromBits(p.getLong("lon", 0L)))
+                    Double.fromBits(p.getLong("lon", 0L))))
                 if (p.getString("key", "") == polyStr) resumeRow = p.getInt("row", 0)
             }
         }
         curPolyKey = polyStr
 
+        // Ultima locație GPS reală persistată (origine pt. TUR la rece, după restart de proces).
+        val lastGps = getSharedPreferences(PREFS, MODE_PRIVATE).let { p ->
+            if (p.getBoolean("gpsValid", false)) validGeo(doubleArrayOf(
+                Double.fromBits(p.getLong("gpsLat", 0L)),
+                Double.fromBits(p.getLong("gpsLon", 0L)))) else null
+        }
+
+        val originForRun: DoubleArray?
+        if (worldTour) {
+            // TUR CAPITALE — pleacă de la ULTIMUL HEXAGON DEBLOCAT / ULTIMA LOCAȚIE GPS, niciodată
+            // „acasă" sau [0,0]:
+            //  • la rece (proces nou / vii din AUTO) → poziția curentă reală sau ultimul GPS salvat,
+            //    și RE-ANCORĂM (resumeRow=-1) ca să recalculăm ordinea din locul tău real;
+            //  • resume GENUIN (parcat) → continuă pe traseul curent, fără repetare.
+            originForRun = if (coldStart) {
+                resumeRow = -1
+                validGeo(realStart) ?: lastGps ?: resumeOrigin
+            } else {
+                resumeOrigin ?: validGeo(realStart) ?: lastGps
+            }
+        } else {
+            originForRun = resumeOrigin ?: validGeo(realStart)
+        }
+
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            resumeOrigin ?: realStart, skipUnlocked, resumeRow, auto, seek, worldTour)
+            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour)
         return START_STICKY
     }
 
@@ -775,12 +811,14 @@ class MockService : Service() {
         // reluare. Fără asta, orderCapitalsTour() s-ar recalcula din poziția CURENTĂ (ultima capitală
         // atinsă) → altă ordine → capitalele deja vizitate ar reapărea la pauză/reluare (bug-ul „reia
         // pe același drum"). Cu ancoră fixă, ordinea e identică și `resumeRow` indexează corect.
-        val reuse = resumeRow > 0 && p.getBoolean("tour_anchor_valid", false)
+        val savedAnchor = if (p.getBoolean("tour_anchor_valid", false))
+            validGeo(doubleArrayOf(Double.fromBits(p.getLong("tour_anchor_lat", 0L)),
+                                   Double.fromBits(p.getLong("tour_anchor_lon", 0L)))) else null
+        val reuse = resumeRow > 0 && savedAnchor != null
         val anchor: DoubleArray = if (reuse) {
-            doubleArrayOf(Double.fromBits(p.getLong("tour_anchor_lat", 0L)),
-                          Double.fromBits(p.getLong("tour_anchor_lon", 0L)))
+            savedAnchor!!
         } else {
-            val a = origin0 ?: doubleArrayOf(IASI_LAT, IASI_LON)
+            val a = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
             p.edit().putBoolean("tour_anchor_valid", true)
                 .putLong("tour_anchor_lat", a[0].toRawBits())
                 .putLong("tour_anchor_lon", a[1].toRawBits()).apply()
@@ -791,7 +829,7 @@ class MockService : Service() {
         if (tour.isEmpty()) { statusText = "🌍 TUR: listă capitale goală"; return }
         val total = tour.size
         // continuăm din poziția REALĂ curentă; la reluare sărim capitalele deja parcurse.
-        var prev = origin0 ?: anchor   // mereu normalizat în [-180,180]
+        var prev = validGeo(origin0) ?: anchor   // mereu normalizat în [-180,180]
         var idx = if (reuse) resumeRow.coerceIn(0, total) else 0
         do {
             while (idx < total) {
@@ -1166,6 +1204,9 @@ class MockService : Service() {
 
     /** Salvează poziția + rândul curent ca să putem relua exact de aici (supraviețuiește repornirii procesului). */
     private fun persistResume() {
+        // NU persista o poziție bidon [0,0] (Golful Guineea): ar deveni „origine" la următoarea
+        // pornire → turul ar pleca din ocean și n-ar debloca nimic lângă tine.
+        if (validGeo(doubleArrayOf(curLat, curLon)) == null) return
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putBoolean("valid", true)
             .putLong("lat", curLat.toRawBits())
@@ -1174,6 +1215,15 @@ class MockService : Service() {
             .putString("key", curPolyKey)
             .apply()
     }
+
+    /**
+     * Coordonată „reală" sau null: respinge null, valorile în afara intervalului și ≈[0,0] (lat&lon
+     * sub ~100m de Null Island = fix lipsă / placeholder, NU o locație validă). Folosit ca să nu
+     * pornim niciodată turul/coverage din [0,0].
+     */
+    private fun validGeo(p: DoubleArray?): DoubleArray? =
+        if (p != null && abs(p[0]) <= 90.0 && abs(p[1]) <= 180.0 &&
+            (abs(p[0]) > 0.001 || abs(p[1]) > 0.001)) p else null
 
     private fun clearResume() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply()
