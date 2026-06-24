@@ -127,17 +127,12 @@ class MainActivity : AppCompatActivity() {
             putExtra(MockService.EXTRA_LOOP, true)
             putExtra(MockService.EXTRA_WORLD_TOUR, true)
             putExtra(MockService.EXTRA_POLY, poly)
-            // CONTINUARE O SINGURĂ DATĂ de la ultima capitală deblocată (Port Moresby): serviciul o
-            // persistă apoi singur, deci o trimitem doar prima oară după acest update. Long-press Stop
-            // (oprire completă) șterge starea → la următorul start, tur complet de la capăt.
-            val sp = getSharedPreferences("mw_ui", MODE_PRIVATE)
-            if (!sp.getBoolean("resumedPortMoresby", false)) {
-                putExtra(MockService.EXTRA_TOUR_RESUME_CAP, "Port Moresby")
-                sp.edit().putBoolean("resumedPortMoresby", true).apply()
-            }
+            // Tur COMPLET pornind din Chișinău (cerut de user). Trimis la fiecare pornire → fiabil
+            // indiferent de starea persistată; serviciul îl folosește ca ancoră + punct de start.
+            putExtra(MockService.EXTRA_TOUR_RESUME_CAP, "Chișinău")
         }
         startForegroundService(i)
-        toast("🌍 TUR CAPITALE — continuă de la Port Moresby, fără capitalele deja parcurse (~2160 km/h)")
+        toast("🌍 TUR CAPITALE — pornește din Chișinău prin toate capitalele lumii (~2160 km/h)")
     }
 
     /**
