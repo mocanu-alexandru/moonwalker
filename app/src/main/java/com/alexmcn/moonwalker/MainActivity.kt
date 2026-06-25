@@ -87,6 +87,10 @@ class MainActivity : AppCompatActivity() {
     private fun handleDebugIntent(intent: Intent?) {
         val mode = intent?.getStringExtra("debug") ?: return
         autoStarted = true   // suprimă auto-start-ul AUTO ca să nu fure modul cerut din adb
+        // override poartă pt. testare rapidă: adb ... --ef gate 2160  → scrie mw_gate (citit de AUTO/Tur)
+        val g = intent.getFloatExtra("gate", 0f)
+        if (g >= 180f) getSharedPreferences("mw_gate", MODE_PRIVATE).edit()
+            .putFloat("gateKmh", g).putBoolean("measured", true).apply()
         // așteaptă masca (root+Bump) gata înainte de a porni modul cerut (retry până la ~15s)
         fun launch(tries: Int) {
             if (UnlockedMask.isReady || tries <= 0) {

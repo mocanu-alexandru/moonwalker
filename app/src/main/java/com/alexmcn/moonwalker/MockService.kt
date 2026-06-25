@@ -39,7 +39,7 @@ class MockService : Service() {
         const val EXTRA_WORLD_TOUR = "worldTour"         // TUR CAPITALE: conduce prin capitalele lumii (nearest-first + 2-opt)
         const val EXTRA_TOUR_RESUME_CAP = "tourResumeCap" // TUR: continuă DUPĂ această capitală (ex. ultima deblocată), o singură dată
         const val EXTRA_SELFTEST = "selfTest"            // DIAGNOSTIC: măsoară poarta Bump + verifică deblocarea, fără să acopere
-        const val WARP_KMH = 1500.0                      // viteză implicită între 2 fix-uri peste care = „salt"/teleport (Bump îl respinge ca warp)
+        const val WARP_KMH = 4000.0                      // SALT real = distanță mare PER PAS (teleport). Condusul continuu la 2000+ km/h (pași mici) e LEGITIM (Lockito merge la 2000); doar teleportul (croazieră 65000) e warp.
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -66,7 +66,7 @@ class MockService : Service() {
 
         private const val PREFS = "mw_resume"
         private const val GATE_PREFS = "mw_gate"          // poarta Bump măsurată de DIAGNOSTIC (km/h), citită de AUTO + Tur
-        const val GATE_FALLBACK_KMH = 540.0               // poartă presupusă dacă diagnosticul n-a rulat încă (soft-spot dovedit)
+        const val GATE_FALLBACK_KMH = 1080.0              // poartă presupusă dacă diagnosticul n-a rulat încă (user: 1080 deblochează „tot"; Lockito merge la 2000)
 
         // stare observabilă pentru UI
         @Volatile var running = false
@@ -428,7 +428,7 @@ class MockService : Service() {
         val origin = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
         UnlockedMask.refresh(applicationContext)
         val gate = measuredGateKmh()
-        val stepM = (gate / 3.6 / tickHz).coerceIn(10.0, 60.0)
+        val stepM = (gate / 3.6 / tickHz).coerceIn(10.0, 160.0)   // sus 160m/pas ≈ 3456 km/h: lasă poarta măsurată să dicteze, fără plafon ascuns
         val tickMs = 1000L / tickHz
         val speedKmh = stepM * tickHz * 3.6
 
@@ -514,7 +514,7 @@ class MockService : Service() {
      */
     private fun driveTourLeg(from: DoubleArray, to: DoubleArray, tickHz: Int, gate: Double, status: String): DoubleArray {
         val gateTickMs = 1000L / tickHz
-        val gateStep = (gate / 3.6 / tickHz).coerceIn(8.0, 60.0)
+        val gateStep = (gate / 3.6 / tickHz).coerceIn(8.0, 160.0)   // fără plafon ascuns: poarta măsurată dictează viteza turului
         return drive(from, to, gateTickMs, gate, gateStep, status)
     }
 
@@ -960,7 +960,7 @@ class MockService : Service() {
         warpCount = 0; maxJumpKmh = 0.0
         statusText = "🔍 DIAGNOSTIC: caut petice blocate lângă tine…"; updateNotif(statusText)
 
-        val speeds = doubleArrayOf(360.0, 540.0, 720.0, 900.0, 1080.0)
+        val speeds = doubleArrayOf(540.0, 1080.0, 1620.0, 2160.0, 2880.0)
         val patches = findFreshPatches(origin, speeds.size)
         if (patches.size < 2) {
             diagReport = "🔍 DIAGNOSTIC: nu găsesc teren blocat lângă tine (deja deblocat în jur?). " +
@@ -1002,13 +1002,13 @@ class MockService : Service() {
             statusText = diagReport; updateNotif(statusText); diagRunning = false; return
         }
         fun ratio(t: Triple<Double, Int, Int>) = t.third.toDouble() / t.second
-        // O singură trecere prinde natural doar ~70-80% (restul îl ia cleanup-ul) → pragul NU e absolut.
-        // POARTA = cea mai MARE viteză care PĂSTREAZĂ acoperirea (≥70% din baseline-ul de viteză mică);
-        // peste poartă, Bump respinge poziții ca „warp" și ratio se prăbușește. Aplicăm o margine 0.9.
-        val baseline = results.maxOf { ratio(it) }   // cea mai bună acoperire single-pass (vitezele mici)
-        val gateTop = results.filter { ratio(it) >= 0.7 * baseline && ratio(it) >= 0.35 }
-            .maxOfOrNull { it.first } ?: 0.0
-        val gate = if (gateTop > 0) (gateTop * 0.9).coerceAtLeast(360.0) else 0.0
+        // O singură trecere prinde NATURAL doar o parte (restul îl ia cleanup-ul), deci nu cerem 90%.
+        // Limita lui Bump e ACCEPTAREA: sub poartă ratio e substanțial (Bump acceptă, cleanup umple);
+        // PESTE poartă (teleport) ratio se PRĂBUȘEȘTE spre 0 (warp respins). POARTA = cea mai MARE viteză
+        // cu ratio ≥ 0.25 (clar acceptat, nu colaps). Margine 0.9. Așa folosim viteza maximă utilizabilă.
+        val baseline = results.maxOf { ratio(it) }
+        val gateTop = results.filter { ratio(it) >= 0.25 }.maxOfOrNull { it.first } ?: 0.0
+        val gate = if (gateTop > 0) (gateTop * 0.9).coerceAtLeast(540.0) else 0.0
         gateKmh = gate
         if (gate > 0) getSharedPreferences(GATE_PREFS, MODE_PRIVATE).edit()
             .putFloat("gateKmh", gate.toFloat()).putBoolean("measured", true).apply()
