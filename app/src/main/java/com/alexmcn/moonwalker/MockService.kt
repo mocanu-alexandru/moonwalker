@@ -40,8 +40,6 @@ class MockService : Service() {
         const val EXTRA_TOUR_RESUME_CAP = "tourResumeCap" // TUR: continuă DUPĂ această capitală (ex. ultima deblocată), o singură dată
         const val EXTRA_SELFTEST = "selfTest"            // DIAGNOSTIC: măsoară poarta Bump + verifică deblocarea, fără să acopere
         const val WARP_KMH = 1500.0                      // viteză implicită între 2 fix-uri peste care = „salt"/teleport (Bump îl respinge ca warp)
-        private const val TOUR_LAND_M = 40_000.0         // TUR HIBRID: rază în jurul fiecărei capitale condusă la POARTĂ (uscat → deblochează); restul = croazieră
-        private const val TOUR_CRUISE_STEP_M = 3000.0    // pas pe „croazieră" (ocean/între capitale): ~65000 km/h la 6 Hz — Bump îl respinge, dar acolo n-avem ce debloca
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -505,29 +503,19 @@ class MockService : Service() {
     }
 
     /**
-     * TUR HIBRID — un „leg" capitală→capitală condus în 3 felii (decizia user: poartă pe uscat, rapid pe
-     * ocean): aproape de FIECARE capitală (≤ TOUR_LAND_M) → viteza-POARTĂ a Bump (uscatul orașului →
-     * deblochează ce trece); mijlocul lung (ocean / nicăieri) → CROAZIERĂ rapidă (Bump îl respinge, dar
-     * acolo n-avem ce debloca). Leg scurt (≤ 2×rază, ex. capitale europene apropiate) → tot la poartă.
-     * Interpolare liniară lat/lon (ca restul appului); `to` vine deja ajustat pt. antimeridian.
+     * TUR LENT (decizie user, după ce datele au dovedit că croaziera NU deblochează): conduce TOT legul
+     * capitală→capitală CONTINUU la viteza-POARTĂ a Bump, deblocând tot ce traversează. FĂRĂ croazieră:
+     * Bump respinge orice teleport ca „warp" ȘI își ÎNGHEAȚĂ referința la ultima poziție acceptată — deci
+     * după un singur salt, fiecare poziție ulterioară (oricât de departe) rămâne un warp → nu se mai
+     * deblochează NIMIC. Singurul mod în care turul deblochează la capitale e să AJUNGĂ acolo prin mișcare
+     * continuă de la origine (lanț neîntrerupt de poziții acceptate). Lent (oceanele = zile de condus pe
+     * apă pt. continuitate), dar e singurul care chiar deblochează. Interpolare liniară lat/lon; `to` vine
+     * deja ajustat pt. antimeridian. (Confirmat pe device: Ierusalim/Amman = 0 deblocate cu croazieră.)
      */
     private fun driveTourLeg(from: DoubleArray, to: DoubleArray, tickHz: Int, gate: Double, status: String): DoubleArray {
         val gateTickMs = 1000L / tickHz
         val gateStep = (gate / 3.6 / tickHz).coerceIn(8.0, 60.0)
-        val cruiseSpeed = TOUR_CRUISE_STEP_M * tickHz * 3.6
-        val d = RouteGenerator.haversine(from, to)
-        if (d <= 2.0 * TOUR_LAND_M || d < 1.0) {
-            return drive(from, to, gateTickMs, gate, gateStep, status)   // tot la poartă (uscat dens)
-        }
-        val fA = TOUR_LAND_M / d; val fB = 1.0 - TOUR_LAND_M / d
-        fun lerp(f: Double) = doubleArrayOf(from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f)
-        val pA = lerp(fA); val pB = lerp(fB)
-        var prev = drive(from, pA, gateTickMs, gate, gateStep, "$status • plecare")
-        cruiseMode = true   // croazieră = salt intenționat → detectorul de „salt GPS" îl ignoră
-        prev = try { drive(pA, pB, gateTickMs, cruiseSpeed, TOUR_CRUISE_STEP_M, "$status • croazieră") }
-               finally { cruiseMode = false }
-        prev = drive(pB, to, gateTickMs, gate, gateStep, "$status • sosire")
-        return prev
+        return drive(from, to, gateTickMs, gate, gateStep, status)
     }
 
     /**
@@ -1098,20 +1086,18 @@ class MockService : Service() {
     }
 
     /**
-     * Ordonează capitalele pt. CEL MAI SCURT tur: nearest-neighbor lacom din `origin` (haversine),
-     * apoi îmbunătățire locală pe un DRUM DESCHIS (origine fixă la stânga, fără ciclu de închidere):
-     *   • 2-opt  — inversează un segment cât timp scurtează traseul (rezolvă încrucișările);
-     *   • Or-opt — relocă un segment de 1..3 capitale (drept sau inversat) acolo unde scurtează mai
-     *     mult (rezolvă „cârligele" rămase de la nearest-neighbor).
-     * Alternăm cele două până nu mai scade lungimea. Aplicăm DOAR mișcări strict mai bune (> eps) →
-     * rezultatul nu poate fi mai prost ca NN+2-opt. N≈195 → câteva pasaje O(N²) = ieftin (<2s).
-     * Determinist (`caps` fix + `origin`) → exact același tur la reluare (de asta depinde resume-ul).
-     * `caps` = lista de ordonat (implicit toate); la CONTINUARE primește doar capitalele RĂMASE.
+     * Ordonează capitalele NEAREST-FIRST PUR (nearest-neighbor lacom din `origin`, haversine): la fiecare
+     * pas mergi la cea mai apropiată capitală RĂMASĂ din poziția curentă → turul CREȘTE din locul tău,
+     * deblochezi întâi ce-i mai aproape (cerere user explicită „primeze cele mai apropiate").
+     *
+     * NU mai facem 2-opt/Or-opt: acelea scurtau traseul TOTAL, dar pt. asta mutau clusterul cel mai
+     * DEPĂRTAT în față (din Iași porneau tocmai la Bișkek ~3673km / Orientul Mijlociu), rupând complet
+     * nearest-first — exact „de ce merge tocmai la Amman?". Pe un drum deschis, „cel mai scurt tur total"
+     * ≠ „cea mai apropiată întâi"; userul vrea a doua. Determinist (`caps` fix + `origin`) → resume stabil.
      */
     private fun orderCapitalsTour(origin: DoubleArray, caps: List<Capitals.Cap> = Capitals.all): List<Capitals.Cap> {
         if (caps.size <= 2) return caps
         fun hav(a: DoubleArray, b: DoubleArray) = RouteGenerator.haversine(a, b)
-        // (1) nearest-neighbor din origine
         val remaining = ArrayList(caps)
         val route = ArrayList<Capitals.Cap>(caps.size)
         var cur = origin
@@ -1123,65 +1109,9 @@ class MockService : Service() {
             }
             val c = remaining.removeAt(bestI); route.add(c); cur = c.coord()
         }
-        val n = route.size
-        fun co(i: Int) = route[i].coord()   // doar returnează DoubleArray-ul stocat (ieftin)
-        // (2) îmbunătățire locală alternând 2-opt + Or-opt până la convergență
-        var improved = true; var pass = 0
-        while (improved && pass < 30 && !stopFlag) {
-            improved = false; pass++
-            // --- 2-opt: inversează route[i..k] dacă scurtează ---
-            for (i in 0 until n - 1) {
-                for (k in i + 1 until n) {
-                    val aPrev = if (i == 0) origin else co(i - 1)
-                    val ai = co(i); val ck = co(k)
-                    val cNext = if (k + 1 < n) co(k + 1) else null
-                    val before = hav(aPrev, ai) + (if (cNext != null) hav(ck, cNext) else 0.0)
-                    val after = hav(aPrev, ck) + (if (cNext != null) hav(ai, cNext) else 0.0)
-                    if (after + 1e-6 < before) {
-                        var lo = i; var hi = k
-                        while (lo < hi) { val t = route[lo]; route[lo] = route[hi]; route[hi] = t; lo++; hi-- }
-                        improved = true
-                    }
-                }
-            }
-            // --- Or-opt: scoate segmentul [i, i+L) și reinserează-l unde scurtează cel mai mult ---
-            for (segLen in 1..3) {
-                var i = 0
-                while (i + segLen <= n) {
-                    val oldPrev = if (i == 0) origin else co(i - 1)
-                    val segFirst = co(i); val segLast = co(i + segLen - 1)
-                    val oldNext = if (i + segLen < n) co(i + segLen) else null
-                    // câștigul din închiderea golului lăsat de segment
-                    val removalSaving = hav(oldPrev, segFirst) +
-                        (if (oldNext != null) hav(segLast, oldNext) - hav(oldPrev, oldNext) else 0.0)
-                    val seg = ArrayList(route.subList(i, i + segLen))
-                    val rest = ArrayList<Capitals.Cap>(n - segLen)
-                    rest.addAll(route.subList(0, i)); rest.addAll(route.subList(i + segLen, n))
-                    val m = rest.size
-                    var bestGain = 1e-6   // pragul: doar mutări STRICT mai bune
-                    var bestG = -1; var bestRev = false
-                    for (g in 0..m) {
-                        val pPrev = if (g == 0) origin else rest[g - 1].coord()
-                        val pNext = if (g < m) rest[g].coord() else null
-                        val gapBase = if (pNext != null) hav(pPrev, pNext) else 0.0
-                        val sF = seg.first().coord(); val sL = seg.last().coord()
-                        val addF = hav(pPrev, sF) + (if (pNext != null) hav(sL, pNext) else 0.0) - gapBase
-                        val addR = hav(pPrev, sL) + (if (pNext != null) hav(sF, pNext) else 0.0) - gapBase
-                        if (removalSaving - addF > bestGain) { bestGain = removalSaving - addF; bestG = g; bestRev = false }
-                        if (segLen > 1 && removalSaving - addR > bestGain) { bestGain = removalSaving - addR; bestG = g; bestRev = true }
-                    }
-                    if (bestG >= 0) {
-                        if (bestRev) seg.reverse()
-                        rest.addAll(bestG, seg)
-                        route.clear(); route.addAll(rest)
-                        improved = true
-                    }
-                    i++
-                }
-            }
-        }
         return route
     }
+
 
     /**
      * Ordonează găurile prin nearest-neighbor lacom pornind din `start` (poziția curentă): la fiecare
