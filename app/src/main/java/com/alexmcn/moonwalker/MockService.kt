@@ -87,6 +87,7 @@ class MockService : Service() {
         @Volatile var gateKmh = 0.0       // poarta Bump măsurată de self-test (0 = nemăsurată)
         @Volatile var diagReport = ""     // raportul ultimului DIAGNOSTIC (afișat în UI)
         @Volatile var diagRunning = false // true cât rulează self-testul
+        @Volatile var cruiseMode = false  // true cât turul e pe „croazieră" (ocean) — salt INTENȚIONAT, NU îl conta ca warp
     }
 
     private lateinit var lm: LocationManager
@@ -296,7 +297,7 @@ class MockService : Service() {
         running = true
         holding = false
         // resetează detectorul de salt GPS pt. rularea curentă
-        warpCount = 0; maxJumpKmh = 0.0; lastJumpKmh = 0.0; lastPushMs = 0L
+        warpCount = 0; maxJumpKmh = 0.0; lastJumpKmh = 0.0; lastPushMs = 0L; cruiseMode = false
         if (!selfTest) diagReport = ""   // un mod normal șterge raportul vechi de diagnostic
         val speedKmh = stepM * tickHz * 3.6
 
@@ -522,7 +523,9 @@ class MockService : Service() {
         fun lerp(f: Double) = doubleArrayOf(from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f)
         val pA = lerp(fA); val pB = lerp(fB)
         var prev = drive(from, pA, gateTickMs, gate, gateStep, "$status • plecare")
-        prev = drive(pA, pB, gateTickMs, cruiseSpeed, TOUR_CRUISE_STEP_M, "$status • croazieră")
+        cruiseMode = true   // croazieră = salt intenționat → detectorul de „salt GPS" îl ignoră
+        prev = try { drive(pA, pB, gateTickMs, cruiseSpeed, TOUR_CRUISE_STEP_M, "$status • croazieră") }
+               finally { cruiseMode = false }
         prev = drive(pB, to, gateTickMs, gate, gateStep, "$status • sosire")
         return prev
     }
@@ -1225,7 +1228,9 @@ class MockService : Service() {
         // DETECTOR „salt GPS": viteza implicită între acest fix și cel anterior. Un teleport (re-ancorare,
         // leg de tur fără interpolare, restart care sare) apare ca o viteză uriașă → Bump îl respinge ca
         // warp și nu deblochează. La condus normal (drive interpolează la stepM) viteza rămâne mică.
-        if (!prevLat.isNaN() && lastPushMs != 0L) {
+        if (!prevLat.isNaN() && lastPushMs != 0L && !cruiseMode) {
+            // NU conta saltul cât suntem pe „croazieră" (ocean, viteză mare INTENȚIONATĂ) — altfel detectorul
+            // ar raporta sute de „salturi" pe mișcare normală și n-ai mai distinge un teleport-bug real.
             val dt = (now - lastPushMs) / 1000.0
             if (dt > 0.04) {
                 val dM = RouteGenerator.haversine(doubleArrayOf(prevLat, prevLon), doubleArrayOf(lat, lon))
