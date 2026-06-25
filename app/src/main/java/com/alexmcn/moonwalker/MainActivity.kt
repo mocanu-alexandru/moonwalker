@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permsLbl: TextView
     private lateinit var btnStop: Button
     private lateinit var btnTour: Button
+    private lateinit var btnDiag: Button
 
     private var curMarker: Marker? = null
     private val ui = Handler(Looper.getMainLooper())
@@ -60,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         status   = findViewById(R.id.status)
         btnStop  = findViewById(R.id.btnStop)
         btnTour  = findViewById(R.id.btnTour)
+        btnDiag  = findViewById(R.id.btnDiag)
 
         setupMap()
         setupButtons()
@@ -70,6 +72,35 @@ class MainActivity : AppCompatActivity() {
 
         // Citește masca (root + Bump) pe thread separat; la succes pornește AUTO automat.
         refreshMaskThenAutoStart()
+        handleDebugIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent); setIntent(intent); handleDebugIntent(intent)
+    }
+
+    /**
+     * Hook de DEBUG (adb): permite pornirea modurilor fără atingere, ex.
+     *   adb shell am start -n com.alexmcn.moonwalker/.MainActivity --es debug selftest|tour|auto
+     * Serviciul nu e exported, deci nu poate fi pornit direct din shell — trecem prin activity.
+     */
+    private fun handleDebugIntent(intent: Intent?) {
+        val mode = intent?.getStringExtra("debug") ?: return
+        autoStarted = true   // suprimă auto-start-ul AUTO ca să nu fure modul cerut din adb
+        // așteaptă masca (root+Bump) gata înainte de a porni modul cerut (retry până la ~15s)
+        fun launch(tries: Int) {
+            if (UnlockedMask.isReady || tries <= 0) {
+                when (mode) {
+                    "selftest" -> startSelfTest()
+                    "tour"     -> startWorldTour()
+                    "auto"     -> startAuto()
+                }
+            } else {
+                if (!UnlockedMask.isReady) refreshMaskThenAutoStart()
+                ui.postDelayed({ launch(tries - 1) }, 1000)
+            }
+        }
+        ui.postDelayed({ launch(15) }, 500)
     }
 
     // ── Hartă ────────────────────────────────────────────────────────────────
@@ -103,6 +134,34 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<ImageButton>(R.id.btnHome).setOnClickListener { goHome() }
         btnTour.setOnClickListener { startWorldTour() }
+        btnDiag.setOnClickListener { startSelfTest() }
+    }
+
+    /**
+     * DIAGNOSTIC: pornește self-testul (măsoară poarta Bump + verifică deblocarea pe câteva petice blocate
+     * lângă tine, fără să acopere zona). Raportul apare în status (vezi pollStatus → MockService.diagReport).
+     */
+    private fun startSelfTest() {
+        if (!UnlockedMask.isReady) {
+            toast("Masca nu e gata (root/Bump?) — diagnosticul are nevoie de footprint-ul Bump"); return
+        }
+        val h = homeLocation
+        val poly = if (h != null)
+            "%.5f,%.5f;%.5f,%.5f;%.5f,%.5f".format(
+                h.latitude - 0.003, h.longitude - 0.003,
+                h.latitude + 0.003, h.longitude + 0.003,
+                h.latitude + 0.003, h.longitude - 0.003)
+        else "47.157,27.577;47.163,27.583;47.163,27.577"
+        val i = Intent(this, MockService::class.java).apply {
+            putExtra(MockService.EXTRA_TICK_HZ, 6)
+            putExtra(MockService.EXTRA_ROW_M, 75.0)
+            putExtra(MockService.EXTRA_STEP_M, 25.0)
+            putExtra(MockService.EXTRA_LOOP, false)
+            putExtra(MockService.EXTRA_SELFTEST, true)
+            putExtra(MockService.EXTRA_POLY, poly)
+        }
+        startForegroundService(i)
+        toast("🔍 DIAGNOSTIC pornit — măsoară poarta Bump și verifică deblocarea (1-2 min)")
     }
 
     /**
@@ -248,9 +307,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 val lat = MockService.curLat
                 val lon = MockService.curLon
+                // Detector „salt GPS": dacă apar salturi/teleporturi, le arătăm live (warpCount > 0 = poziția
+                // sare → Bump le respinge ca warp). La rulare sănătoasă rămâne 0.
+                val warp = if (MockService.warpCount > 0)
+                    "\n⚠ salturi GPS: %d (max %.0f km/h)".format(MockService.warpCount, MockService.maxJumpKmh) else ""
+                val report = MockService.diagReport
                 status.text = when {
-                    running -> "● %s\nlat %.5f  lon %.5f\npuncte: %d".format(
-                        MockService.statusText, lat, lon, MockService.pointsDone)
+                    report.isNotEmpty() && !running && !holding -> report   // raport diagnostic după rulare
+                    running -> "● %s\nlat %.5f  lon %.5f\npuncte: %d%s".format(
+                        MockService.statusText, lat, lon, MockService.pointsDone, warp)
                     holding -> "⏸ parcat\nlat %.5f  lon %.5f".format(lat, lon)
                     else    -> "○ ${MockService.statusText}"
                 }

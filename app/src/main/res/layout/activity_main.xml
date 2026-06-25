@@ -70,6 +70,15 @@
         android:paddingTop="8dp"
         android:paddingBottom="8dp" />
 
+    <!-- DIAGNOSTIC: măsoară poarta Bump + verifică deblocarea, fără să acopere. Raport în status. -->
+    <Button android:id="@+id/btnDiag"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🔍 DIAGNOSTIC — verifică deblocarea + poarta Bump"
+        android:textSize="13sp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp" />
+
     <TextView
         android:id="@+id/versionTv"
         android:layout_width="match_parent"

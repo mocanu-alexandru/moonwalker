@@ -38,6 +38,10 @@ class MockService : Service() {
         const val EXTRA_SEEK = "seek"                    // seek & destroy: vânează găurile (hexagoane singulare nedeblocate)
         const val EXTRA_WORLD_TOUR = "worldTour"         // TUR CAPITALE: conduce prin capitalele lumii (nearest-first + 2-opt)
         const val EXTRA_TOUR_RESUME_CAP = "tourResumeCap" // TUR: continuă DUPĂ această capitală (ex. ultima deblocată), o singură dată
+        const val EXTRA_SELFTEST = "selfTest"            // DIAGNOSTIC: măsoară poarta Bump + verifică deblocarea, fără să acopere
+        const val WARP_KMH = 1500.0                      // viteză implicită între 2 fix-uri peste care = „salt"/teleport (Bump îl respinge ca warp)
+        private const val TOUR_LAND_M = 40_000.0         // TUR HIBRID: rază în jurul fiecărei capitale condusă la POARTĂ (uscat → deblochează); restul = croazieră
+        private const val TOUR_CRUISE_STEP_M = 3000.0    // pas pe „croazieră" (ocean/între capitale): ~65000 km/h la 6 Hz — Bump îl respinge, dar acolo n-avem ce debloca
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -63,6 +67,8 @@ class MockService : Service() {
         const val ACTION_RELEASE = "com.alexmcn.moonwalker.RELEASE"  // oprire completă: revii la GPS real
 
         private const val PREFS = "mw_resume"
+        private const val GATE_PREFS = "mw_gate"          // poarta Bump măsurată de DIAGNOSTIC (km/h), citită de AUTO + Tur
+        const val GATE_FALLBACK_KMH = 540.0               // poartă presupusă dacă diagnosticul n-a rulat încă (soft-spot dovedit)
 
         // stare observabilă pentru UI
         @Volatile var running = false
@@ -74,6 +80,13 @@ class MockService : Service() {
         @Volatile var pointsDone = 0
         @Volatile var statusText = "oprit"
         @Volatile var flpActive = false   // true dacă FLP setMockMode (canalul "Google fused") a reușit
+        // DIAGNOSTIC — detector „salt GPS" (sare aleatoriu): viteza implicită între fix-uri consecutive.
+        @Volatile var warpCount = 0       // câte fix-uri au sărit peste WARP_KMH de la pornire (teleport → Bump le respinge)
+        @Volatile var maxJumpKmh = 0.0    // cel mai mare salt implicit observat în rularea curentă
+        @Volatile var lastJumpKmh = 0.0   // viteza implicită a ultimului fix injectat
+        @Volatile var gateKmh = 0.0       // poarta Bump măsurată de self-test (0 = nemăsurată)
+        @Volatile var diagReport = ""     // raportul ultimului DIAGNOSTIC (afișat în UI)
+        @Volatile var diagRunning = false // true cât rulează self-testul
     }
 
     private lateinit var lm: LocationManager
@@ -84,11 +97,13 @@ class MockService : Service() {
     @Volatile private var stopFlag = false
     private var prevLat = Double.NaN
     private var prevLon = Double.NaN
+    @Volatile private var lastPushMs = 0L   // momentul ultimei injecții (pt. detectorul de salt GPS)
     // Pauză-hold: thread care reinjectează ultima poziție ca să rămânem „parcați" (Bump nu revine acasă)
     private var holdThread: Thread? = null
     @Volatile private var holdStop = false
     private var curPolyKey = ""          // poly-ul rulării curente (pt. a ști dacă reluăm același traseu)
     @Volatile private var lastUiMs = 0L  // throttling update notificare/status
+    @Volatile private var lastLogMs = 0L // throttling log live poziție (diagnostic)
     @Volatile private var lastProgressMs = 0L   // ultima injecție reușită (watchdog stagnare)
     @Volatile private var injectFails = 0       // injecții consecutive eșuate (self-heal provider)
     private var watchdog: Thread? = null
@@ -127,8 +142,9 @@ class MockService : Service() {
         val seek = intent?.getBooleanExtra(EXTRA_SEEK, false) ?: false
         val worldTour = intent?.getBooleanExtra(EXTRA_WORLD_TOUR, false) ?: false
         val tourResumeCap = intent?.getStringExtra(EXTRA_TOUR_RESUME_CAP)
-        // Auto/seek sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
-        if ((skipUnlocked || auto || seek) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
+        val selfTest = intent?.getBooleanExtra(EXTRA_SELFTEST, false) ?: false
+        // Auto/seek/diagnostic sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
+        if ((skipUnlocked || auto || seek || selfTest) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
 
         // Repornire fără date (intent gol de la sticky/onTaskRemoved) → nu porni traseu bogus.
@@ -241,8 +257,15 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour, tourResumeCap)
+            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour, tourResumeCap, selfTest)
         return START_STICKY
+    }
+
+    /** Poarta Bump (km/h): măsurată de DIAGNOSTIC dacă există, altfel fallback-ul dovedit (~540). */
+    private fun measuredGateKmh(): Double {
+        val p = getSharedPreferences(GATE_PREFS, MODE_PRIVATE)
+        val g = p.getFloat("gateKmh", 0f).toDouble()
+        return if (p.getBoolean("measured", false) && g >= 180.0) g else GATE_FALLBACK_KMH
     }
 
     private fun parsePoly(poly: String): List<DoubleArray> =
@@ -256,7 +279,7 @@ class MockService : Service() {
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
         auto: Boolean = false, seek: Boolean = false, worldTour: Boolean = false,
-        tourResumeCap: String? = null
+        tourResumeCap: String? = null, selfTest: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -272,6 +295,9 @@ class MockService : Service() {
         stopFlag = false
         running = true
         holding = false
+        // resetează detectorul de salt GPS pt. rularea curentă
+        warpCount = 0; maxJumpKmh = 0.0; lastJumpKmh = 0.0; lastPushMs = 0L
+        if (!selfTest) diagReport = ""   // un mod normal șterge raportul vechi de diagnostic
         val speedKmh = stepM * tickHz * 3.6
 
         // Non-reference-counted: fiecare acquire() doar RESETEAZĂ timeout-ul (renewWakelock() per
@@ -312,14 +338,16 @@ class MockService : Service() {
             pointsDone = 0; lastUiMs = 0L
             var prev: DoubleArray? = transitionOrigin
 
-            if (seek) {
+            if (selfTest) {
+                runSelfTest(transitionOrigin)
+            } else if (seek) {
                 runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
             } else if (worldTour) {
-                // TUR CAPITALE — vezi runWorldTour(). Pură călătorie (fără mască/calibrare/cleanup).
-                runWorldTour(transitionOrigin, tickMs, speedKmh, metersPerTick, loop, resumeRow)
+                // TUR CAPITALE HIBRID — poartă pe uscat (deblochează), croazieră pe ocean. Vezi runWorldTour().
+                runWorldTour(transitionOrigin, tickHz, loop)
             } else if (auto) {
-                // MOD AUTONOM „BLAST RADIUS pe JUDEȚE" — vezi runAutoCounties().
-                runAutoCounties(transitionOrigin, tickHz)
+                // MOD AUTONOM (rescris): BLAST-RADIUS din GPS la POARTA Bump măsurată — vezi runAutoUnlock().
+                runAutoUnlock(transitionOrigin, tickHz)
             } else {
                 var gen = RouteGenerator(zone, rowM, stepM, vertical, skipUnlocked)
                 when {
@@ -374,9 +402,129 @@ class MockService : Service() {
             if (nowMs - lastUiMs >= 333) {
                 lastUiMs = nowMs; statusText = status; updateNotif(status)
             }
+            // LOG live (throttled 2s) — poziția + saltul implicit + nr. de warp-uri (diagnostic „sare GPS-ul")
+            if (nowMs - lastLogMs >= 2000) {
+                lastLogMs = nowMs
+                android.util.Log.i("MockService", "POS %.5f,%.5f jump=%.0fkm/h warps=%d | %s"
+                    .format(lat, lon, lastJumpKmh, warpCount, status))
+            }
             try { Thread.sleep(tickMs) } catch (_: InterruptedException) {}
         }
         return to
+    }
+
+    /**
+     * AUTO (REScris de la 0) — DEBLOCARE prin BLAST-RADIUS din locația ta GPS, la POARTA reală a Bump
+     * (măsurată de DIAGNOSTIC; fallback ~540 km/h dacă n-a rulat încă). Fără euristicile vechi (fără
+     * județ-cu-județ, fără calibrare-baterie, fără soft-spot timid, fără dual-mode FRESH_LOCKED): un
+     * singur val care se extinde în INELE de tile-uri (~3 km) din originea ta, NEAREST-FIRST → deblochezi
+     * întâi ce-i mai aproape. Trece DOAR prin celule blocate (tile deja deblocat → `expected` gol →
+     * sărit instant) → fără timp pierdut peste deblocat. După fiecare tile: self-check footprint +
+     * GARANȚIE 100% (cleanup pe celulele rămase). Conturul țării (RomaniaGeo) ține valul în România.
+     *   • viteza = poarta măsurată (nu sub = lent inutil, nu peste = warp respins de Bump);
+     *   • RESUME e gratuit: la repornire tile-urile deja deblocate au expected gol → sărite;
+     *   • dead-pipeline: 3 tile-uri mari la rând cu 0 deblocate → alertă + back-off + self-heal.
+     */
+    private fun runAutoUnlock(origin0: DoubleArray?, tickHz: Int) {
+        val origin = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        UnlockedMask.refresh(applicationContext)
+        val gate = measuredGateKmh()
+        val stepM = (gate / 3.6 / tickHz).coerceIn(10.0, 60.0)
+        val tickMs = 1000L / tickHz
+        val speedKmh = stepM * tickHz * 3.6
+
+        val tileM = 3000.0
+        val mLat = 111_320.0
+        val dLatDeg = tileM / mLat
+        val dLonDeg = tileM / (mLat * cos(Math.toRadians(origin[0])))
+        val halfLat = dLatDeg / 2.0; val halfLon = dLonDeg / 2.0
+        val maxRing = RomaniaGeo.maxRingBlocks(origin[0], origin[1], tileM)
+
+        var prev: DoubleArray? = origin
+        var deadStreak = 0
+        var tilesDone = 0; var skipped = 0
+        for (r in 0..maxRing) {
+            if (stopFlag) break
+            renewWakelock()
+            // tile-urile de pe inelul Chebyshev `r` (distanță în tile-uri din origine) care ating România
+            val ring = ArrayList<DoubleArray>()
+            for (di in -r..r) for (dj in -r..r) {
+                if (max(abs(di), abs(dj)) != r) continue
+                val cLat = origin[0] + di * dLatDeg
+                val cLon = origin[1] + dj * dLonDeg
+                if (RomaniaGeo.blockTouches(cLat, cLon, tileM / 2, tileM / 2)) ring.add(doubleArrayOf(cLat, cLon))
+            }
+            if (ring.isEmpty()) continue
+            // în interiorul inelului mergem nearest-first din poziția curentă (val continuu, fără salturi)
+            for (t in orderNearestFirst(prev, ring)) {
+                if (stopFlag) break
+                renewWakelock()
+                val raw = UnlockedMask.lockedCellsInBbox(t[0] - halfLat, t[0] + halfLat, t[1] - halfLon, t[1] + halfLon)
+                // interior (toate colțurile în țară) → fără filtru scump; tile de graniță → filtrează per-celulă
+                val interior = RomaniaGeo.contains(t[0] - halfLat, t[1] - halfLon) &&
+                    RomaniaGeo.contains(t[0] - halfLat, t[1] + halfLon) &&
+                    RomaniaGeo.contains(t[0] + halfLat, t[1] - halfLon) &&
+                    RomaniaGeo.contains(t[0] + halfLat, t[1] + halfLon)
+                val expected = if (interior) raw else filterInRomania(raw)
+                if (expected.isEmpty()) { skipped++; continue }   // tile deja deblocat → skip instant
+                statusText = "🤖 AUTO • inel %d • tile %d • %d blocate • %.0f km/h".format(r, tilesDone + 1, expected.size, speedKmh)
+                updateNotif(statusText)
+                prev = coverLockedDirect(expected, CoverageController.Params(75.0, stepM, tickHz), prev, statusText)
+                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                if (UnlockedMask.refresh(applicationContext)) {
+                    val gained = UnlockedMask.gainedAmong(expected)
+                    if (gained == 0 && expected.size >= 300) {
+                        deadStreak++
+                        if (deadStreak >= 3) {
+                            statusText = "⚠ PIPELINE MORT: 0 deblocate din %d — verifică Xposed/root/Bump. Back-off 60s".format(expected.size)
+                            updateNotif(statusText); reacquireProviders()
+                            try { Thread.sleep(DEAD_BACKOFF_MS) } catch (_: InterruptedException) {}
+                            UnlockedMask.refresh(applicationContext); deadStreak = 0
+                        }
+                    } else deadStreak = 0
+                    // GARANȚIE 100%: țintește direct celulele rămase blocate din tile
+                    prev = cleanupBlockToFull(expected, prev, tickMs, speedKmh, stepM, tilesDone + 1)
+                }
+                tilesDone++
+            }
+        }
+        if (!stopFlag) {
+            statusText = "🤖 AUTO ✓ România acoperită (%d tile-uri lucrate, %d deja deblocate)".format(tilesDone, skipped)
+            updateNotif(statusText); AutoState.clear(applicationContext)
+        }
+    }
+
+    /** Păstrează doar celulele al căror centru cade în România (pt. tile-urile de graniță). */
+    private fun filterInRomania(cells: LongArray): LongArray {
+        if (cells.isEmpty()) return cells
+        val centers = UnlockedMask.cellCentersAligned(cells)
+        val out = ArrayList<Long>(cells.size)
+        for (i in cells.indices) { val c = centers[i] ?: continue; if (RomaniaGeo.contains(c[0], c[1])) out.add(cells[i]) }
+        return out.toLongArray()
+    }
+
+    /**
+     * TUR HIBRID — un „leg" capitală→capitală condus în 3 felii (decizia user: poartă pe uscat, rapid pe
+     * ocean): aproape de FIECARE capitală (≤ TOUR_LAND_M) → viteza-POARTĂ a Bump (uscatul orașului →
+     * deblochează ce trece); mijlocul lung (ocean / nicăieri) → CROAZIERĂ rapidă (Bump îl respinge, dar
+     * acolo n-avem ce debloca). Leg scurt (≤ 2×rază, ex. capitale europene apropiate) → tot la poartă.
+     * Interpolare liniară lat/lon (ca restul appului); `to` vine deja ajustat pt. antimeridian.
+     */
+    private fun driveTourLeg(from: DoubleArray, to: DoubleArray, tickHz: Int, gate: Double, status: String): DoubleArray {
+        val gateTickMs = 1000L / tickHz
+        val gateStep = (gate / 3.6 / tickHz).coerceIn(8.0, 60.0)
+        val cruiseSpeed = TOUR_CRUISE_STEP_M * tickHz * 3.6
+        val d = RouteGenerator.haversine(from, to)
+        if (d <= 2.0 * TOUR_LAND_M || d < 1.0) {
+            return drive(from, to, gateTickMs, gate, gateStep, status)   // tot la poartă (uscat dens)
+        }
+        val fA = TOUR_LAND_M / d; val fB = 1.0 - TOUR_LAND_M / d
+        fun lerp(f: Double) = doubleArrayOf(from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f)
+        val pA = lerp(fA); val pB = lerp(fB)
+        var prev = drive(from, pA, gateTickMs, gate, gateStep, "$status • plecare")
+        prev = drive(pA, pB, gateTickMs, cruiseSpeed, TOUR_CRUISE_STEP_M, "$status • croazieră")
+        prev = drive(pB, to, gateTickMs, gate, gateStep, "$status • sosire")
+        return prev
     }
 
     /**
@@ -804,6 +952,95 @@ class MockService : Service() {
     }
 
     /**
+     * DIAGNOSTIC (self-test) — răspunde la două întrebări, automat, fără să acopere nimic:
+     *   (1) DEBLOCHEAZĂ? — ia câteva petice BLOCATE lângă tine, le conduce la viteze crescătoare (360…1080
+     *       km/h), apoi citește footprint-ul Bump și măsoară `gained/expected` per viteză. ratio≈0 peste tot
+     *       = pipeline mort (Xposed/root/Bump). Cea mai mare viteză cu ratio ≥ 0.9 = POARTA reală a Bump.
+     *   (2) SARE GPS-UL? — detectorul din pushLocation numără salturile (viteză implicită > WARP_KMH) și ține
+     *       maxJumpKmh; le raportăm. La un test corect warpCount≈0; dacă e mare, poziția teleportează (bug).
+     * Persistă poarta în prefs (`mw_gate`) → AUTO și Turul pornesc de la viteza dovedită sigură pe ACEST
+     * device. Raportul rămâne în `diagReport` (afișat în UI). Fail-safe: fără teren blocat → o spune și iese.
+     */
+    private fun runSelfTest(origin0: DoubleArray?) {
+        diagRunning = true
+        val origin = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        UnlockedMask.refresh(applicationContext)
+        val baseCount = UnlockedMask.count
+        warpCount = 0; maxJumpKmh = 0.0
+        statusText = "🔍 DIAGNOSTIC: caut petice blocate lângă tine…"; updateNotif(statusText)
+
+        val speeds = doubleArrayOf(360.0, 540.0, 720.0, 900.0, 1080.0)
+        val patches = findFreshPatches(origin, speeds.size)
+        if (patches.size < 2) {
+            diagReport = "🔍 DIAGNOSTIC: nu găsesc teren blocat lângă tine (deja deblocat în jur?). " +
+                "Mută-te într-o zonă neacoperită și reîncearcă."
+            statusText = diagReport; updateNotif(statusText); diagRunning = false; return
+        }
+
+        val tickHz = 6
+        val safeTickMs = 1000L / tickHz
+        var prev: DoubleArray? = origin
+        val results = ArrayList<Triple<Double, Int, Int>>()   // viteză, expected, gained
+        for ((i, sp) in speeds.withIndex()) {
+            if (stopFlag || i >= patches.size) break
+            val b = patches[i]
+            val cen = doubleArrayOf((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0)
+            // transit SIGUR la patch (viteză mică, nu warp) ca intrarea să nu fie respinsă
+            prev = drive(prev ?: cen, cen, safeTickMs, 360.0, 25.0, "🔍 spre patch ${i + 1}/${patches.size}")
+            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+            UnlockedMask.refresh(applicationContext)
+            val expected = UnlockedMask.lockedCellsInBbox(b[0], b[1], b[2], b[3])
+            if (expected.size < CALIB_MIN) continue   // patch deja (cvasi) deblocat → fără eșantion valid
+            val stepM = (sp / 3.6 / tickHz).coerceAtLeast(1.0)
+            val p = CoverageController.Params(75.0, stepM, tickHz)
+            prev = coverLockedDirect(expected, p, prev, "🔍 test %.0f km/h (%d/%d)".format(sp, i + 1, speeds.size))
+            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+            if (!UnlockedMask.refresh(applicationContext)) continue
+            val gained = UnlockedMask.gainedAmong(expected)
+            results.add(Triple(sp, expected.size, gained))
+            android.util.Log.i("MockService", "SELFTEST %.0f km/h: %d/%d (%.0f%%)".format(
+                sp, gained, expected.size, gained * 100.0 / expected.size))
+        }
+        // întoarcere sigură la origine
+        if (!stopFlag) drive(prev ?: origin, origin, safeTickMs, 360.0, 25.0, "🔍 revin la origine")
+
+        UnlockedMask.refresh(applicationContext)
+        val netUnlocked = UnlockedMask.count - baseCount
+        if (results.isEmpty()) {
+            diagReport = "🔍 DIAGNOSTIC: n-am putut măsura (fără eșantion valid). Salturi GPS: $warpCount."
+            statusText = diagReport; updateNotif(statusText); diagRunning = false; return
+        }
+        fun ratio(t: Triple<Double, Int, Int>) = t.third.toDouble() / t.second
+        // O singură trecere prinde natural doar ~70-80% (restul îl ia cleanup-ul) → pragul NU e absolut.
+        // POARTA = cea mai MARE viteză care PĂSTREAZĂ acoperirea (≥70% din baseline-ul de viteză mică);
+        // peste poartă, Bump respinge poziții ca „warp" și ratio se prăbușește. Aplicăm o margine 0.9.
+        val baseline = results.maxOf { ratio(it) }   // cea mai bună acoperire single-pass (vitezele mici)
+        val gateTop = results.filter { ratio(it) >= 0.7 * baseline && ratio(it) >= 0.35 }
+            .maxOfOrNull { it.first } ?: 0.0
+        val gate = if (gateTop > 0) (gateTop * 0.9).coerceAtLeast(360.0) else 0.0
+        gateKmh = gate
+        if (gate > 0) getSharedPreferences(GATE_PREFS, MODE_PRIVATE).edit()
+            .putFloat("gateKmh", gate.toFloat()).putBoolean("measured", true).apply()
+
+        val perSpeed = results.joinToString("\n") {
+            val tag = if (it.first <= gateTop && gateTop > 0) "✓" else if (gateTop > 0) "✗ warp" else ""
+            "   %.0f km/h → %.0f%% (%d/%d) %s".format(it.first, ratio(it) * 100, it.third, it.second, tag) }
+        val verdict = when {
+            baseline < 0.05 ->
+                "❌ NU deblochează nimic — pipeline mort (verifică Xposed/root/Bump logat)"
+            gate > 0 -> "✅ Deblochează (single-pass %.0f%%). Poarta Bump ≈ %.0f km/h → folosesc %.0f în AUTO+Tur".format(
+                baseline * 100, gateTop, gate)
+            else -> "⚠ Deblochează slab chiar și la 360 km/h — poarta sub 360, folosesc fallback %.0f".format(GATE_FALLBACK_KMH)
+        }
+        diagReport = "🔍 DIAGNOSTIC\n$verdict\nDeblocare per viteză:\n$perSpeed\n" +
+            "Footprint nou: +$netUnlocked celule\nSalturi GPS (>%.0f km/h): %d • max %.0f km/h".format(
+                WARP_KMH, warpCount, maxJumpKmh)
+        statusText = verdict; updateNotif(statusText)
+        android.util.Log.i("MockService", diagReport.replace("\n", " | "))
+        diagRunning = false
+    }
+
+    /**
      * TUR CAPITALE: conduce CONTINUU (fără teleport) prin capitalele lumii, în ordine nearest-first din
      * poziția curentă + ameliorare 2-opt (metrică HAVERSINE — corectă la scară globală, spre deosebire de
      * metrica planară a modului România). Fiecare „leg" capitală→capitală e condus de `drive` la viteza
@@ -812,9 +1049,8 @@ class MockService : Service() {
      * drumul SCURT, iar `pushLocation` re-normalizează longitudinea injectată în [-180,180]. NU folosește
      * masca/calibrarea/AutoState (pură călătorie). `loop` → reia turul de la capăt la final.
      */
-    private fun runWorldTour(origin0: DoubleArray?, tickMs: Long, speedKmh: Double,
-                             metersPerTick: Double, loop: Boolean, resumeRow: Int = -1,
-                             resumeCapName: String? = null) {
+    private fun runWorldTour(origin0: DoubleArray?, tickHz: Int, loop: Boolean) {
+        val gate = measuredGateKmh()   // viteza la care Bump ACCEPTĂ și deblochează (lângă capitale)
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
         // CHECKLIST „bifate": setul capitalelor DEJA PARCURSE = preset (lista ta din Capitals.PRESET_DONE)
         // ∪ cele bifate AUTOMAT pe parcurs (persistate în `tour_done`). Excluse din traseu → fără repetare.
@@ -847,7 +1083,8 @@ class MockService : Service() {
                 val dLon = tgtLon - prev[1]
                 if (dLon > 180.0) tgtLon -= 360.0 else if (dLon < -180.0) tgtLon += 360.0
                 val distKm = RouteGenerator.haversine(prev, doubleArrayOf(cap.lat, cap.lon)) / 1000.0
-                drive(prev, doubleArrayOf(cap.lat, tgtLon), tickMs, speedKmh, metersPerTick,
+                // HIBRID: poartă lângă capitală (uscat → deblochează), croazieră rapidă pe mijloc (ocean).
+                driveTourLeg(prev, doubleArrayOf(cap.lat, tgtLon), tickHz, gate,
                     "🌍 TUR • %d/%d • %s (%.0f km) • %d bifate".format(i + 1, total, cap.name, distKm, done.size))
                 prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
                 markDone(cap.name)                       // BIFEAZĂ (persistă) → nu se mai repetă
@@ -985,6 +1222,20 @@ class MockService : Service() {
         // Normalizează longitudinea în [-180,180]: turul capitalelor poate conduce „peste" antimeridian
         // (ex. Wellington 174° → Apia 189° ca să meargă pe drumul scurt) → readuce în interval la injecție.
         val lon = ((lonRaw + 540.0) % 360.0) - 180.0
+        // DETECTOR „salt GPS": viteza implicită între acest fix și cel anterior. Un teleport (re-ancorare,
+        // leg de tur fără interpolare, restart care sare) apare ca o viteză uriașă → Bump îl respinge ca
+        // warp și nu deblochează. La condus normal (drive interpolează la stepM) viteza rămâne mică.
+        if (!prevLat.isNaN() && lastPushMs != 0L) {
+            val dt = (now - lastPushMs) / 1000.0
+            if (dt > 0.04) {
+                val dM = RouteGenerator.haversine(doubleArrayOf(prevLat, prevLon), doubleArrayOf(lat, lon))
+                val kmh = dM / dt * 3.6
+                lastJumpKmh = kmh
+                if (kmh > maxJumpKmh) maxJumpKmh = kmh
+                if (kmh > WARP_KMH) warpCount++
+            }
+        }
+        lastPushMs = now
         prevLat = lat; prevLon = lon
         // Câmpuri EXACT ca Lockito (decompilat s5.b.a): doar time, lat/lon, altitude, speed,
         // accuracy, elapsedRealtimeNanos. FĂRĂ bearing, FĂRĂ sub-acurateți, FĂRĂ extras —
