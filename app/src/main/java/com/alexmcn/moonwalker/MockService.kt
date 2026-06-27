@@ -398,6 +398,8 @@ class MockService : Service() {
             pushLocation(lat, lon, speedKmh)
             curLat = lat; curLon = lon; pointsDone++
             val nowMs = SystemClock.elapsedRealtime()
+            // NB: ancora „ultimul hexagon deblocat" se persistă DOAR la o capitală VERIFICATĂ (gained>0),
+            // nu mid-leg — ca un leg respins (0 deblocate) să NU suprascrie ancora cu poziții ne-deblocate.
             if (nowMs - lastUiMs >= 333) {
                 lastUiMs = nowMs; statusText = status; updateNotif(status)
             }
@@ -1040,25 +1042,106 @@ class MockService : Service() {
      * drumul SCURT, iar `pushLocation` re-normalizează longitudinea injectată în [-180,180]. NU folosește
      * masca/calibrarea/AutoState (pură călătorie). `loop` → reia turul de la capăt la final.
      */
-    private fun runWorldTour(origin0: DoubleArray?, tickHz: Int, loop: Boolean) {
-        val gate = measuredGateKmh()   // viteza la care Bump ACCEPTĂ și deblochează (lângă capitale)
+    /** Persistă „ultimul hexagon deblocat" (poziția curentă de pe un leg care deblochează). */
+    private fun saveTourPos(lat: Double, lon: Double) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putLong("tourLat", lat.toRawBits()).putLong("tourLon", lon.toRawBits())
+            .putBoolean("tourPosValid", true).apply()
+    }
+
+    /** Ultimul hexagon deblocat persistat = ancora reală a Bump (de unde reluăm CONTINUU). Null dacă lipsește. */
+    private fun lastTourPos(): DoubleArray? {
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-        // CHECKLIST „bifate": setul capitalelor DEJA PARCURSE = preset (lista ta din Capitals.PRESET_DONE)
-        // ∪ cele bifate AUTOMAT pe parcurs (persistate în `tour_done`). Excluse din traseu → fără repetare.
+        if (!p.getBoolean("tourPosValid", false)) return null
+        return validGeo(doubleArrayOf(
+            Double.fromBits(p.getLong("tourLat", 0L)),
+            Double.fromBits(p.getLong("tourLon", 0L))))
+    }
+
+    /**
+     * „Bifat REAL" = footprint-ul Bump are ≥1 celulă deblocată în jurul capitalei (eșantion 3×3 ~65m).
+     * Echivalentul pe device al verificării fizice (k-ring) din scriptul de validare. Fail-safe: false.
+     */
+    private fun capitalUnlocked(lat: Double, lon: Double): Boolean {
+        val d = 0.0007   // ~75m: o celulă res-10
+        for (dy in -1..1) for (dx in -1..1)
+            if (UnlockedMask.isUnlocked(lat + dy * d, lon + dx * d)) return true
+        return false
+    }
+
+    private fun runWorldTour(origin0: DoubleArray?, tickHz: Int, loop: Boolean) {
+        // VITEZĂ TREPTATĂ („creste treptat viteza ca să acopere și să nu meargă în gol"): pornesc de la
+        // poarta măsurată și URC cu rampStep după fiecare capitală deblocată; la 0-deblocate SCAD + cluster.
+        val baseGate = measuredGateKmh()                       // viteza la care Bump ACCEPTĂ (măsurată de diag)
+        val rampStep = (baseGate * 0.25).coerceAtLeast(60.0)   // pas de urcare
+        val gateMax  = (baseGate * 5.0).coerceAtMost(3000.0)   // plafon dur (rampa se autolimitează la eșec)
+        var curGate  = baseGate
+        // HILL-CLIMB către viteza OPTIMĂ (cerere user): URC pas cu pas cât încă deblochează; când o
+        // viteză EȘUEAZĂ (0 deblocate) o rețin ca PLAFON și nu mai urc peste ea → converg chiar sub
+        // tavanul real al Bump, nu doar oscilez. `ceilGate` scade pe măsură ce descopăr limita.
+        var ceilGate = gateMax
+        val box = 0.006   // ~670m: bbox-ul local al capitalei pt. verificarea „chiar s-a deblocat aici?"
+
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        // CHECKLIST „bifate": preset (Capitals.PRESET_DONE) ∪ cele bifate AUTOMAT pe parcurs (`tour_done`).
         val done = (p.getStringSet("tour_done", null)?.toMutableSet() ?: mutableSetOf())
         done.addAll(Capitals.PRESET_DONE)
+
+        // VALIDARE FOOTPRINT la pornire („actualizez traseele"): scot din checklist capitalele bifate care
+        // de fapt NU sunt deblocate în Bump (0 celule) → re-intră în traseu. PRESET_DONE rămâne (lista ta
+        // manuală, sursă de adevăr). Persistez setul curățat → bifele false nu mai sunt sărite niciodată.
+        if (UnlockedMask.refresh(applicationContext)) {
+            val byName = Capitals.all.associateBy { it.name }
+            val dropped = ArrayList<String>()
+            val it = done.iterator()
+            while (it.hasNext()) {
+                val name = it.next()
+                if (name in Capitals.PRESET_DONE) continue
+                val cap = byName[name] ?: continue
+                if (!capitalUnlocked(cap.lat, cap.lon)) { it.remove(); dropped.add(name) }
+            }
+            if (dropped.isNotEmpty()) {
+                p.edit().putStringSet("tour_done", HashSet(done)).apply()
+                android.util.Log.i("MockService", "TUR re-validare footprint: scot ${dropped.size} bife false → $dropped")
+                statusText = "🌍 TUR: ${dropped.size} bife false scoase (re-deblochez)"; updateNotif(statusText)
+            }
+        }
+
         fun markDone(name: String) {
             if (done.add(name)) p.edit().putStringSet("tour_done", HashSet(done)).apply()
         }
 
-        // De unde ordonăm + pornim: poziția REALĂ curentă dacă există (continuă de unde ești), altfel
-        // Chișinău (home). Traseul se RECALCULEAZĂ peste capitalele rămase → se adaptează la checklist.
-        val startPoint = validGeo(origin0)
+        // DE UNDE PORNIM (cerere user, CRITIC pt. „GPS curat"): ULTIMUL HEXAGON DEBLOCAT persistat — NU
+        // poziția reală a telefonului. Telefonul oprit rămâne înghețat unde a fost ultima injecție (ex.
+        // după un test, în Zagreb); a relua de-acolo ar TELEPORTA față de ancora Bump (warp → îngheață
+        // referința → nu mai deblochează). Ultimul hexagon deblocat ESTE ancora Bump → reluare CONTINUĂ.
+        val startPoint = lastTourPos()
+            ?: validGeo(origin0)
             ?: Capitals.all.firstOrNull { it.name == "Chișinău" }?.coord()
             ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        android.util.Log.i("MockService", "TUR start = %.4f,%.4f (ultimul hex deblocat=%b)"
+            .format(startPoint[0], startPoint[1], lastTourPos() != null))
 
         statusText = "🌍 TUR: calculez traseul rămas…"; updateNotif(statusText)
         var prev = startPoint
+        // PUNTE ANTI-TELEPORT (critic — vezi freeze-ul Bump de 2 zile): reluăm din ultimul hex (ancoră),
+        // dar dacă telefonul e fizic în ALTĂ parte (după un fix GPS real / repornire la rece), a injecta
+        // direct ancora = TELEPORT = warp → Bump îngheață deblocarea ~2 zile. În loc de salt: pornim de la
+        // poziția REALĂ a telefonului (== last-known → fără salt) și conducem CONTINUU până la ancoră la
+        // viteza-poartă (deblochează și pe drum), apoi continuă turul normal. Niciodată teleport.
+        val realPos = validGeo(origin0)
+        if (lastTourPos() != null && realPos != null) {
+            val bridgeKm = RouteGenerator.haversine(realPos, startPoint) / 1000.0
+            if (bridgeKm > 5.0) {   // peste driftul normal al unei pauze → altfel ar fi teleport
+                android.util.Log.i("MockService", "TUR PUNTE %.0f km: %.4f,%.4f → ancoră %.4f,%.4f (fără salt)"
+                    .format(bridgeKm, realPos[0], realPos[1], startPoint[0], startPoint[1]))
+                var aLon = startPoint[1]; val dl = aLon - realPos[1]
+                if (dl > 180.0) aLon -= 360.0 else if (dl < -180.0) aLon += 360.0
+                driveTourLeg(realPos, doubleArrayOf(startPoint[0], aLon), tickHz, baseGate,
+                    "🌉 TUR • punte continuă %.0f km → ultimul hex (fără teleport)".format(bridgeKm))
+                prev = startPoint
+            }
+        }
         do {
             val remaining = Capitals.all.filter { it.name !in done }
             if (remaining.isEmpty()) {
@@ -1074,13 +1157,52 @@ class MockService : Service() {
                 val dLon = tgtLon - prev[1]
                 if (dLon > 180.0) tgtLon -= 360.0 else if (dLon < -180.0) tgtLon += 360.0
                 val distKm = RouteGenerator.haversine(prev, doubleArrayOf(cap.lat, cap.lon)) / 1000.0
-                // HIBRID: poartă lângă capitală (uscat → deblochează), croazieră rapidă pe mijloc (ocean).
-                driveTourLeg(prev, doubleArrayOf(cap.lat, tgtLon), tickHz, gate,
-                    "🌍 TUR • %d/%d • %s (%.0f km) • %d bifate".format(i + 1, total, cap.name, distKm, done.size))
+
+                // celulele ÎNCĂ blocate în jurul capitalei ÎNAINTE de leg = referința verificării
+                val expBefore = UnlockedMask.lockedCellsInBbox(cap.lat - box, cap.lat + box, tgtLon - box, tgtLon + box)
+                // FIRUL: condu continuu la viteza curentă (rampă). Bump deblochează ce traversează.
+                driveTourLeg(prev, doubleArrayOf(cap.lat, tgtLon), tickHz, curGate,
+                    "🌍 TUR • %d/%d • %s (%.0f km) • %.0f km/h • %d bifate".format(i + 1, total, cap.name, distKm, curGate, done.size))
                 prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
-                markDone(cap.name)                       // BIFEAZĂ (persistă) → nu se mai repetă
+
+                // VERIFICARE FIZICĂ: re-citește footprint-ul → chiar s-a deblocat aici?
+                try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                val measured = UnlockedMask.refresh(applicationContext)
+                val gained = if (measured) UnlockedMask.gainedAmong(expBefore) else -1
+                when {
+                    !measured -> markDone(cap.name)   // fără măsurătoare validă → best-effort, nu blochez turul
+                    expBefore.isEmpty() || gained > 0 -> {
+                        // SUCCES (sau zona era deja deblocată) → bifează REAL + ancorează aici + URC viteza
+                        markDone(cap.name)
+                        if (gained > 0) saveTourPos(cap.lat, cap.lon)   // ancoră = ultima capitală chiar deblocată
+                        // URC spre optim, dar NU peste plafonul descoperit (converge sub tavanul Bump)
+                        curGate = (curGate + rampStep).coerceAtMost((ceilGate - rampStep).coerceAtLeast(baseGate))
+                    }
+                    else -> {
+                        // 0 DEBLOCATE la viteza asta = „merge în gol": rețin viteza ca PLAFON (tavan Bump
+                        // descoperit), SCAD + CLUSTER doar aici, retry. Așa converg sub limita reală.
+                        ceilGate = minOf(ceilGate, curGate)
+                        curGate = (curGate - 2 * rampStep).coerceAtLeast(baseGate)
+                        statusText = "🌍 TUR • %s 0 deblocate → scad la %.0f km/h + cluster".format(cap.name, curGate)
+                        updateNotif(statusText)
+                        val stepM = (curGate / 3.6 / tickHz).coerceIn(8.0, 160.0)
+                        val expRetry = UnlockedMask.lockedCellsInBbox(cap.lat - box, cap.lat + box, tgtLon - box, tgtLon + box)
+                        if (expRetry.isNotEmpty()) {
+                            prev = cleanupBlockToFull(expRetry, prev, 1000L / tickHz, curGate, stepM, i + 1) ?: prev
+                            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                            UnlockedMask.refresh(applicationContext)
+                        }
+                        val gained2 = if (expRetry.isEmpty()) 1 else UnlockedMask.gainedAmong(expRetry)
+                        if (gained2 > 0) markDone(cap.name)   // cluster a prins → bifează
+                        else {
+                            // tot 0 → NU bifa: rămâne în traseu, se reîncearcă la bucla următoare. Alertă.
+                            statusText = "⚠ TUR • %s tot 0 deblocate — rămâne în traseu".format(cap.name)
+                            updateNotif(statusText)
+                        }
+                    }
+                }
             }
-            statusText = "🌍 TUR ✓ $total capitale parcurse acum (${done.size}/${Capitals.all.size} bifate)"
+            statusText = "🌍 TUR ✓ rundă: ${done.size}/${Capitals.all.size} bifate"
             updateNotif(statusText)
         } while (loop && !stopFlag)
     }
