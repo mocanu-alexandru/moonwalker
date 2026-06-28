@@ -1083,65 +1083,47 @@ class MockService : Service() {
         val box = 0.006   // ~670m: bbox-ul local al capitalei pt. verificarea „chiar s-a deblocat aici?"
 
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
-        // CHECKLIST „bifate": preset (Capitals.PRESET_DONE) ∪ cele bifate AUTOMAT pe parcurs (`tour_done`).
-        val done = (p.getStringSet("tour_done", null)?.toMutableSet() ?: mutableSetOf())
-        done.addAll(Capitals.PRESET_DONE)
-
-        // VALIDARE FOOTPRINT la pornire („actualizez traseele"): scot din checklist capitalele bifate care
-        // de fapt NU sunt deblocate în Bump (0 celule) → re-intră în traseu. PRESET_DONE rămâne (lista ta
-        // manuală, sursă de adevăr). Persistez setul curățat → bifele false nu mai sunt sărite niciodată.
+        // CHECKLIST „bifate" — SURSA DE ADEVĂR = footprint-ul REAL Bump, nu o listă manuală.
+        // (Reproiectare: lista hardcodată `PRESET_DONE` rata țări deja deblocate care nu erau în ea —
+        //  ex. Paris/Madrid/Roma/Tokyo + toată coasta de N/V a Africii — și le reparcurgea inutil.)
+        // Aici derivăm „gata" DIRECT din ce e efectiv deblocat: orice capitală a cărei celulă există
+        // deja în Bump e bifată și SĂRITĂ → zero reparcurgere; rutăm strict țările încă blocate.
+        val done = mutableSetOf<String>()
         if (UnlockedMask.refresh(applicationContext)) {
-            val byName = Capitals.all.associateBy { it.name }
-            val dropped = ArrayList<String>()
-            val it = done.iterator()
-            while (it.hasNext()) {
-                val name = it.next()
-                if (name in Capitals.PRESET_DONE) continue
-                val cap = byName[name] ?: continue
-                if (!capitalUnlocked(cap.lat, cap.lon)) { it.remove(); dropped.add(name) }
-            }
-            if (dropped.isNotEmpty()) {
-                p.edit().putStringSet("tour_done", HashSet(done)).apply()
-                android.util.Log.i("MockService", "TUR re-validare footprint: scot ${dropped.size} bife false → $dropped")
-                statusText = "🌍 TUR: ${dropped.size} bife false scoase (re-deblochez)"; updateNotif(statusText)
-            }
+            // footprint citit OK → derivă checklistul exclusiv din realitate
+            for (cap in Capitals.all) if (capitalUnlocked(cap.lat, cap.lon)) done.add(cap.name)
+            p.edit().putStringSet("tour_done", HashSet(done)).apply()   // persistă starea reală
+            android.util.Log.i("MockService",
+                "TUR: ${done.size}/${Capitals.all.size} capitale deja deblocate (footprint real) → sar peste")
+            statusText = "🌍 TUR: ${done.size}/${Capitals.all.size} țări deja făcute → rutez restul"
+            updateNotif(statusText)
+        } else {
+            // FAIL-SAFE fără root/mask: nu putem citi realitatea → folosim ultima stare persistată +
+            // lista manuală ca să nu reparcurgem ce știm sigur că-i gata (mai bine sar known-done decât tot).
+            done.addAll(p.getStringSet("tour_done", null) ?: emptySet())
+            done.addAll(Capitals.PRESET_DONE)
+            android.util.Log.w("MockService", "TUR: footprint indisponibil → fallback listă (${done.size} bifate)")
         }
 
         fun markDone(name: String) {
             if (done.add(name)) p.edit().putStringSet("tour_done", HashSet(done)).apply()
         }
 
-        // DE UNDE PORNIM (cerere user, CRITIC pt. „GPS curat"): ULTIMUL HEXAGON DEBLOCAT persistat — NU
-        // poziția reală a telefonului. Telefonul oprit rămâne înghețat unde a fost ultima injecție (ex.
-        // după un test, în Zagreb); a relua de-acolo ar TELEPORTA față de ancora Bump (warp → îngheață
-        // referința → nu mai deblochează). Ultimul hexagon deblocat ESTE ancora Bump → reluare CONTINUĂ.
-        val startPoint = lastTourPos()
-            ?: validGeo(origin0)
+        // DE UNDE PORNIM (cerere user): POZIȚIA REALĂ CURENTĂ a telefonului → mergem direct la cea mai
+        // apropiată capitală ÎNCĂ BLOCATĂ de unde ești ACUM. NU mai facem ocol la „ultimul hex deblocat"
+        // (ancora putea fi la mii de km — ex. Malabo — și trimitea turul tocmai acolo înainte să înceapă).
+        // Fără teleport: primul leg realPos→capitală e condus CONTINUU de drive(), iar primul fix injectat
+        // == last-known real → Bump nu vede salt. Ancora rămâne doar fallback la rece (fără GPS, n-ai fix
+        // anterior de care să „sari", deci injectarea ei e oricum sigură).
+        val startPoint = validGeo(origin0)
+            ?: lastTourPos()
             ?: Capitals.all.firstOrNull { it.name == "Chișinău" }?.coord()
             ?: doubleArrayOf(IASI_LAT, IASI_LON)
-        android.util.Log.i("MockService", "TUR start = %.4f,%.4f (ultimul hex deblocat=%b)"
-            .format(startPoint[0], startPoint[1], lastTourPos() != null))
+        android.util.Log.i("MockService", "TUR start = %.4f,%.4f (poziție reală=%b)"
+            .format(startPoint[0], startPoint[1], validGeo(origin0) != null))
 
-        statusText = "🌍 TUR: calculez traseul rămas…"; updateNotif(statusText)
+        statusText = "🌍 TUR: caut cea mai apropiată capitală blocată…"; updateNotif(statusText)
         var prev = startPoint
-        // PUNTE ANTI-TELEPORT (critic — vezi freeze-ul Bump de 2 zile): reluăm din ultimul hex (ancoră),
-        // dar dacă telefonul e fizic în ALTĂ parte (după un fix GPS real / repornire la rece), a injecta
-        // direct ancora = TELEPORT = warp → Bump îngheață deblocarea ~2 zile. În loc de salt: pornim de la
-        // poziția REALĂ a telefonului (== last-known → fără salt) și conducem CONTINUU până la ancoră la
-        // viteza-poartă (deblochează și pe drum), apoi continuă turul normal. Niciodată teleport.
-        val realPos = validGeo(origin0)
-        if (lastTourPos() != null && realPos != null) {
-            val bridgeKm = RouteGenerator.haversine(realPos, startPoint) / 1000.0
-            if (bridgeKm > 5.0) {   // peste driftul normal al unei pauze → altfel ar fi teleport
-                android.util.Log.i("MockService", "TUR PUNTE %.0f km: %.4f,%.4f → ancoră %.4f,%.4f (fără salt)"
-                    .format(bridgeKm, realPos[0], realPos[1], startPoint[0], startPoint[1]))
-                var aLon = startPoint[1]; val dl = aLon - realPos[1]
-                if (dl > 180.0) aLon -= 360.0 else if (dl < -180.0) aLon += 360.0
-                driveTourLeg(realPos, doubleArrayOf(startPoint[0], aLon), tickHz, baseGate,
-                    "🌉 TUR • punte continuă %.0f km → ultimul hex (fără teleport)".format(bridgeKm))
-                prev = startPoint
-            }
-        }
         do {
             val remaining = Capitals.all.filter { it.name !in done }
             if (remaining.isEmpty()) {
