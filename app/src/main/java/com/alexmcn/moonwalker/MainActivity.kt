@@ -19,10 +19,9 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 
 /**
- * UI minimal, MOD UNIC AUTONOM. La deschiderea aplicației pornește SINGUR acoperirea autonomă a
- * României (seek găuri apropiate → pătrate concentrice → seek final). Nu există mod manual / panou
- * developer / butoane extra: ecranul e doar harta + status + un singur buton de control (pornește /
- * pauză / oprire) care e doar un override peste pornirea automată.
+ * UI minimal. La deschiderea aplicației NU pornește NIMIC automat (cerere user) — ca să nu suprascrie
+ * ultima locație / ancora. Pornirea e DOAR manuală: butonul de jos = AUTO (acoperă România), butonul
+ * TUR = turul lumii. Deschiderea doar reîmprospătează masca deblocate și afișează harta + status.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -70,7 +69,7 @@ class MainActivity : AppCompatActivity() {
         showVersion()
         verifySetupAtStartup()   // update + mock-location verificate o dată la pornire (ca Lockito)
 
-        // Citește masca (root + Bump) pe thread separat; la succes pornește AUTO automat.
+        // Citește masca deblocate (root + Bump) pe thread separat. NU pornește nimic — start doar manual.
         refreshMaskThenAutoStart()
         handleDebugIntent(intent)
     }
@@ -228,16 +227,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Pornește AUTO automat o singură dată per proces, când totul e gata (mască + mock location).
-     * Dacă userul a oprit deja (running/holding) marchează ca pornit și nu mai intervine.
+     * AUTO-START DEZACTIVAT (cerere user): la deschiderea aplicației NU mai pornește nimic — niciun
+     * traseu, nicio acoperire — ca să nu mai suprascrie ultima locație / ancora. Pornirea o face DOAR
+     * userul manual (butonul de jos pentru AUTO, butonul TUR pentru turul lumii). Funcția rămâne (e
+     * apelată din onCreate/onResume după refresh-ul măștii) dar nu mai inițiază nimic.
      */
     private fun maybeAutoStart() {
-        if (autoStarted) return
-        if (MockService.running || MockService.holding) { autoStarted = true; return }
-        if (!UnlockedMask.isReady) return       // mască indisponibilă (root/Bump) → așteaptă, retry pe onResume
-        if (!isMockLocationEnabled()) return     // setup incomplet → userul fixează, retry pe onResume
-        autoStarted = true
-        startAuto()
+        // intenționat gol — vezi nota de mai sus (pornire doar manuală)
     }
 
     /**
