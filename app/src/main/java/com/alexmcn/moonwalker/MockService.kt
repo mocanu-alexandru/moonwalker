@@ -39,7 +39,15 @@ class MockService : Service() {
         const val EXTRA_WORLD_TOUR = "worldTour"         // TUR CAPITALE: conduce prin capitalele lumii (nearest-first + 2-opt)
         const val EXTRA_TOUR_RESUME_CAP = "tourResumeCap" // TUR: continuă DUPĂ această capitală (ex. ultima deblocată), o singură dată
         const val EXTRA_SELFTEST = "selfTest"            // DIAGNOSTIC: măsoară poarta Bump + verifică deblocarea, fără să acopere
+        const val EXTRA_PAINT_TEST = "paintTest"         // TEST: croazieră la teren blocat → pictură LENTĂ (~120 km/h) → raportează celule pictate
         const val WARP_KMH = 4000.0                      // SALT real = distanță mare PER PAS (teleport). Condusul continuu la 2000+ km/h (pași mici) e LEGITIM (Lockito merge la 2000); doar teleportul (croazieră 65000) e warp.
+        // MODEL ZBOR+ATERIZARE (dovedit): viteza „de avion" trece de filtrul anti-warp al Bump (1944 îngheța);
+        // aterizarea lentă pictează. Vezi runWorldTour + runPaintTest.
+        // Viteză de zbor cu JITTER per leg ∈ [FLIGHT_MIN, FLIGHT_MAX] (cerere user: ~1080 ± random) — mai
+        // plauzibil (zboruri reale au viteze diferite). 800 e dovedit sigur; 1000–1200 e peste, sub 1944.
+        const val FLIGHT_MIN = 1000.0
+        const val FLIGHT_MAX = 1200.0
+        const val LAND_KMH = 35.0                        // viteză „de aterizare" — lentă, ca Bump să picteze
         private const val H3_RES10_AREA_M2 = 15047.0     // aria medie a unei celule H3 res-10 (≈0.0150 km²)
         private const val FRESH_LOCKED_FRACTION = 0.5    // ≥ atât din județ încă blocat = „proaspăt" → pătrate concentrice (blast); sub = serpentină doar peste celulele blocate
         // CALIBRARE (o dată per device, la primul start AUTO): măsoară poarta reală a Bump — e limitat de
@@ -142,6 +150,7 @@ class MockService : Service() {
         val worldTour = intent?.getBooleanExtra(EXTRA_WORLD_TOUR, false) ?: false
         val tourResumeCap = intent?.getStringExtra(EXTRA_TOUR_RESUME_CAP)
         val selfTest = intent?.getBooleanExtra(EXTRA_SELFTEST, false) ?: false
+        val paintTest = intent?.getBooleanExtra(EXTRA_PAINT_TEST, false) ?: false
         // Auto/seek/diagnostic sar/folosesc masca → are nevoie de ea. Asigură un set proaspăt înainte de rulare.
         if ((skipUnlocked || auto || seek || selfTest) && !UnlockedMask.isReady) UnlockedMask.refresh(applicationContext)
         val polyStr = intent?.getStringExtra(EXTRA_POLY)
@@ -256,7 +265,7 @@ class MockService : Service() {
 
         startForeground(NOTIF_ID, buildNotif("pornire..."))
         startWalking(zone, tickHz, rowM, stepM, vertical, loop, skipFraction,
-            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour, tourResumeCap, selfTest)
+            originForRun, skipUnlocked, resumeRow, auto, seek, worldTour, tourResumeCap, selfTest, paintTest)
         return START_STICKY
     }
 
@@ -278,7 +287,7 @@ class MockService : Service() {
         vertical: Boolean, loop: Boolean, skipFraction: Double = 0.0,
         realStart: DoubleArray? = null, skipUnlocked: Boolean = false, resumeRow: Int = -1,
         auto: Boolean = false, seek: Boolean = false, worldTour: Boolean = false,
-        tourResumeCap: String? = null, selfTest: Boolean = false
+        tourResumeCap: String? = null, selfTest: Boolean = false, paintTest: Boolean = false
     ) {
         // Fix dublă-rulare: dacă userul schimbă setări și repornește, oprește COMPLET
         // thread-ul vechi (sincron) înainte de a reseta stopFlag — altfel thread-ul vechi
@@ -337,7 +346,9 @@ class MockService : Service() {
             pointsDone = 0; lastUiMs = 0L
             var prev: DoubleArray? = transitionOrigin
 
-            if (selfTest) {
+            if (paintTest) {
+                runPaintTest(transitionOrigin)
+            } else if (selfTest) {
                 runSelfTest(transitionOrigin)
             } else if (seek) {
                 runSeekAndDestroy(prev, tickMs, speedKmh, metersPerTick)
@@ -945,6 +956,52 @@ class MockService : Service() {
     }
 
     /**
+     * VERIFICARE PICTURĂ (DIAGNOSTIC, sigur): confirmă end-to-end că modelul ZBOR+ATERIZARE chiar
+     * deblochează, fără să acopere zona. Zboară la viteza de tur (FLIGHT_MIN..MAX, sub plafonul de warp)
+     * până la cel mai apropiat teren BLOCAT, aterizează lent (landAndPaint) și raportează câte celule
+     * s-au pictat + câte „salturi" (warpCount). +cel > 0 = pipeline OK; 0 = verifică Xposed/freeze.
+     */
+    private fun runPaintTest(origin0: DoubleArray?) {
+        diagRunning = true
+        val origin = validGeo(origin0) ?: doubleArrayOf(IASI_LAT, IASI_LON)
+        UnlockedMask.refresh(applicationContext)
+        statusText = "🎯 VERIFICARE: caut teren blocat apropiat…"; updateNotif(statusText)
+        // cel mai apropiat punct BLOCAT (inele pătrate ~150m de la origine)
+        val step = 0.0015
+        var target: DoubleArray? = null
+        ringloop@ for (r in 1..300) {
+            for (dy in -r..r) for (dx in -r..r) {
+                if (max(abs(dy), abs(dx)) != r) continue
+                val la = origin[0] + dy * step
+                val lo = origin[1] + dx * step / cos(Math.toRadians(origin[0]))
+                if (!UnlockedMask.isUnlocked(la, lo)) { target = doubleArrayOf(la, lo); break@ringloop }
+            }
+        }
+        val tgt = target
+        if (tgt == null) {
+            diagReport = "🎯 VERIFICARE: fără teren blocat în jur (~67km)"; statusText = diagReport
+            updateNotif(statusText); diagRunning = false; return
+        }
+        val distKm = RouteGenerator.haversine(origin, tgt) / 1000.0
+        val tickMs = 1000L / 6
+        warpCount = 0
+        // ZBOR la viteza de tur (sub plafon) până la țintă, apoi ATERIZARE lentă → pictează
+        val flightKmh = FLIGHT_MIN + Math.random() * (FLIGHT_MAX - FLIGHT_MIN)
+        UnlockedMask.refresh(applicationContext); val before = UnlockedMask.count
+        drive(origin, tgt, tickMs, flightKmh, flightKmh / 3.6 / 6.0, "✈️ verificare: zbor %.0f km/h".format(flightKmh))
+        statusText = "🛬 verificare: aterizez (pictez)…"; updateNotif(statusText)
+        landAndPaint(tgt, 6, "🛬 verificare: pictez")
+        try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+        UnlockedMask.refresh(applicationContext)
+        val painted = UnlockedMask.count - before
+        diagReport = "🎯 VERIFICARE: zbor %.0f km/h (%.0f km) + aterizare → +%d celule, %d salturi%s"
+            .format(flightKmh, distKm, painted, warpCount, if (painted > 0) "  ✓ PICTEAZĂ" else "  ✗ 0 (verifică Xposed/freeze)")
+        statusText = diagReport; updateNotif(statusText)
+        android.util.Log.i("MockService", "VERIFICARE: +%d cel, %d salturi (%.0f km/h)".format(painted, warpCount, flightKmh))
+        diagRunning = false
+    }
+
+    /**
      * DIAGNOSTIC (self-test) — răspunde la două întrebări, automat, fără să acopere nimic:
      *   (1) DEBLOCHEAZĂ? — ia câteva petice BLOCATE lângă tine, le conduce la viteze crescătoare (360…1080
      *       km/h), apoi citește footprint-ul Bump și măsoară `gained/expected` per viteză. ratio≈0 peste tot
@@ -1069,17 +1126,35 @@ class MockService : Service() {
         return false
     }
 
+    /**
+     * ATERIZARE: conduce LENT (LAND_KMH) un mic serpentin în jurul `center` ca Bump să picteze ≥1 celulă
+     * (Bump pictează doar mișcare lentă plauzibilă). Întoarce poziția finală. ~5 rânduri × ~600m la ~80m.
+     */
+    private fun landAndPaint(center: DoubleArray, tickHz: Int, status: String): DoubleArray {
+        val tickMs = 1000L / tickHz
+        val landStepM = LAND_KMH / 3.6 / tickHz
+        val kLon = cos(Math.toRadians(center[0])).coerceAtLeast(0.1)
+        val rowLat = 0.0008                 // ~90m între rânduri
+        val halfLon = 0.0030 / kLon         // ~300m jumătate-lățime
+        var prev = center
+        for (row in 0..4) {
+            if (stopFlag) break
+            val la = center[0] + (row - 2) * rowLat
+            val a = doubleArrayOf(la, center[1] - halfLon)
+            val b = doubleArrayOf(la, center[1] + halfLon)
+            val from = if (row % 2 == 0) a else b
+            val to   = if (row % 2 == 0) b else a
+            prev = drive(prev, from, tickMs, LAND_KMH, landStepM, status)
+            prev = drive(prev, to,   tickMs, LAND_KMH, landStepM, status)
+        }
+        return prev
+    }
+
     private fun runWorldTour(origin0: DoubleArray?, tickHz: Int, loop: Boolean) {
-        // VITEZĂ TREPTATĂ („creste treptat viteza ca să acopere și să nu meargă în gol"): pornesc de la
-        // poarta măsurată și URC cu rampStep după fiecare capitală deblocată; la 0-deblocate SCAD + cluster.
-        val baseGate = measuredGateKmh()                       // viteza la care Bump ACCEPTĂ (măsurată de diag)
-        val rampStep = (baseGate * 0.25).coerceAtLeast(60.0)   // pas de urcare
-        val gateMax  = (baseGate * 5.0).coerceAtMost(3000.0)   // plafon dur (rampa se autolimitează la eșec)
-        var curGate  = baseGate
-        // HILL-CLIMB către viteza OPTIMĂ (cerere user): URC pas cu pas cât încă deblochează; când o
-        // viteză EȘUEAZĂ (0 deblocate) o rețin ca PLAFON și nu mai urc peste ea → converg chiar sub
-        // tavanul real al Bump, nu doar oscilez. `ceilGate` scade pe măsură ce descopăr limita.
-        var ceilGate = gateMax
+        // MODEL ZBOR + ATERIZARE (dovedit că deblochează — PAINTTEST +2 cel): zburăm între capitale la
+        // viteză de AVION (FLIGHT_KMH, sub plafonul de warp Bump), apoi „aterizăm" și conducem LENT
+        // (landAndPaint) ca Bump să picteze ≥1 celulă → țara bifată. Fără ramping de viteză (acela urca
+        // peste plafon și îngheța footprint-ul).
         val box = 0.006   // ~670m: bbox-ul local al capitalei pt. verificarea „chiar s-a deblocat aici?"
 
         val p = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -1142,9 +1217,14 @@ class MockService : Service() {
 
                 // celulele ÎNCĂ blocate în jurul capitalei ÎNAINTE de leg = referința verificării
                 val expBefore = UnlockedMask.lockedCellsInBbox(cap.lat - box, cap.lat + box, tgtLon - box, tgtLon + box)
-                // FIRUL: condu continuu la viteza curentă (rampă). Bump deblochează ce traversează.
-                driveTourLeg(prev, doubleArrayOf(cap.lat, tgtLon), tickHz, curGate,
-                    "🌍 TUR • %d/%d • %s (%.0f km) • %.0f km/h • %d bifate".format(i + 1, total, cap.name, distKm, curGate, done.size))
+                // ZBOR: condu continuu la viteză „de avion" cu JITTER per leg (∈[FLIGHT_MIN,FLIGHT_MAX]) →
+                // sub plafonul de warp, dar variabil (plauzibil ca zboruri reale). Zborul pictează dâra pe sub.
+                val flightKmh = FLIGHT_MIN + Math.random() * (FLIGHT_MAX - FLIGHT_MIN)
+                driveTourLeg(prev, doubleArrayOf(cap.lat, tgtLon), tickHz, flightKmh,
+                    "✈️ TUR • %d/%d • %s (%.0f km) • zbor %.0f km/h • %d bifate".format(i + 1, total, cap.name, distKm, flightKmh, done.size))
+                // ATERIZARE: condu LENT în jurul capitalei → Bump pictează țara.
+                statusText = "🛬 TUR • %s • aterizez (pictez)".format(cap.name); updateNotif(statusText)
+                landAndPaint(doubleArrayOf(cap.lat, tgtLon), tickHz, "🛬 TUR • %d/%d • %s • pictez".format(i + 1, total, cap.name))
                 prev = doubleArrayOf(cap.lat, cap.lon)   // capitala reală, în [-180,180]
 
                 // VERIFICARE FIZICĂ: re-citește footprint-ul → chiar s-a deblocat aici?
@@ -1152,33 +1232,21 @@ class MockService : Service() {
                 val measured = UnlockedMask.refresh(applicationContext)
                 val gained = if (measured) UnlockedMask.gainedAmong(expBefore) else -1
                 when {
-                    !measured -> markDone(cap.name)   // fără măsurătoare validă → best-effort, nu blochez turul
-                    expBefore.isEmpty() || gained > 0 -> {
-                        // SUCCES (sau zona era deja deblocată) → bifează REAL + ancorează aici + URC viteza
+                    !measured -> markDone(cap.name)              // fără măsurătoare validă → best-effort
+                    expBefore.isEmpty() || gained > 0 -> {       // SUCCES (sau era deja deblocat)
                         markDone(cap.name)
-                        if (gained > 0) saveTourPos(cap.lat, cap.lon)   // ancoră = ultima capitală chiar deblocată
-                        // URC spre optim, dar NU peste plafonul descoperit (converge sub tavanul Bump)
-                        curGate = (curGate + rampStep).coerceAtMost((ceilGate - rampStep).coerceAtLeast(baseGate))
+                        if (gained > 0) saveTourPos(cap.lat, cap.lon)
                     }
                     else -> {
-                        // 0 DEBLOCATE la viteza asta = „merge în gol": rețin viteza ca PLAFON (tavan Bump
-                        // descoperit), SCAD + CLUSTER doar aici, retry. Așa converg sub limita reală.
-                        ceilGate = minOf(ceilGate, curGate)
-                        curGate = (curGate - 2 * rampStep).coerceAtLeast(baseGate)
-                        statusText = "🌍 TUR • %s 0 deblocate → scad la %.0f km/h + cluster".format(cap.name, curGate)
-                        updateNotif(statusText)
-                        val stepM = (curGate / 3.6 / tickHz).coerceIn(8.0, 160.0)
-                        val expRetry = UnlockedMask.lockedCellsInBbox(cap.lat - box, cap.lat + box, tgtLon - box, tgtLon + box)
-                        if (expRetry.isNotEmpty()) {
-                            prev = cleanupBlockToFull(expRetry, prev, 1000L / tickHz, curGate, stepM, i + 1) ?: prev
-                            try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
-                            UnlockedMask.refresh(applicationContext)
-                        }
-                        val gained2 = if (expRetry.isEmpty()) 1 else UnlockedMask.gainedAmong(expRetry)
-                        if (gained2 > 0) markDone(cap.name)   // cluster a prins → bifează
+                        // aterizarea n-a pictat → mai aterizez O DATĂ (a doua trecere prinde des restul).
+                        statusText = "🛬 TUR • %s • 0 pictate → reaterizez".format(cap.name); updateNotif(statusText)
+                        landAndPaint(doubleArrayOf(cap.lat, tgtLon), tickHz, "🛬 retry • %s".format(cap.name))
+                        try { Thread.sleep(SETTLE_MS) } catch (_: InterruptedException) {}
+                        UnlockedMask.refresh(applicationContext)
+                        if (UnlockedMask.gainedAmong(expBefore) > 0) { markDone(cap.name); saveTourPos(cap.lat, cap.lon) }
                         else {
                             // tot 0 → NU bifa: rămâne în traseu, se reîncearcă la bucla următoare. Alertă.
-                            statusText = "⚠ TUR • %s tot 0 deblocate — rămâne în traseu".format(cap.name)
+                            statusText = "⚠ TUR • %s tot 0 pictate — rămâne în traseu".format(cap.name)
                             updateNotif(statusText)
                         }
                     }
